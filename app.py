@@ -655,16 +655,24 @@ elif menu == "🛒 2. Vender Perfiles":
                 else:
                     p_final = sug_total
                 
-            if st.button("➕ Añadir al Combo", type="secondary", key=f"btn_add_{str(i_sel)}"):
-                st.session_state.carrito.append({
-                    "index_original": i_sel, "Plataforma": plat_v, "Correo_Matriz": str(d_p["Correo"]), 
-                    "Clave_Matriz": str(d_p["Clave"]), "Perfil_Pantalla": n_fin, "PIN": pin_asig, 
-                    "Meses": m_in, "Precio_Calculado": p_final, "Correo_Cliente": c_cli_in, "Clave_Cliente": cl_cli_in
-                })
+            item_nuevo = {
+                "index_original": i_sel, "Plataforma": plat_v, "Correo_Matriz": str(d_p["Correo"]), 
+                "Clave_Matriz": str(d_p["Clave"]), "Perfil_Pantalla": n_fin, "PIN": pin_asig, 
+                "Meses": m_in, "Precio_Calculado": p_final, "Correo_Cliente": c_cli_in, "Clave_Cliente": cl_cli_in
+            }
+            cb_a, cb_b = st.columns(2)
+            if cb_a.button("➕ Añadir al Combo", type="secondary", key=f"btn_add_{str(i_sel)}"):
+                st.session_state.carrito.append(item_nuevo)
+                st.rerun()
+            if cb_b.button("🚀 Venta (solo este perfil)", type="primary", key=f"btn_venta_{str(i_sel)}"):
+                st.session_state.carrito = [item_nuevo]
+                st.session_state.aviso_venta = True
                 st.rerun()
 
         if st.session_state.carrito:
             st.markdown("---")
+            if st.session_state.pop("aviso_venta", False):
+                st.success("✅ Perfil listo. Baja y completa los datos del cliente en el formulario para confirmar la venta.")
             st.subheader("🛒 Carrito Actual")
             st.table(pd.DataFrame(st.session_state.carrito)[["Plataforma", "Perfil_Pantalla", "Meses", "Precio_Calculado"]])
             if st.button("❌ Vaciar Carrito", type="secondary", key="btn_vaciar_cart"):

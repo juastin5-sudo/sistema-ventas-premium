@@ -431,6 +431,7 @@ if menu == "📌 Panel Diario":
     n_mat = 0
     if not df_inv_res.empty:
         c_res = df_inv_res.drop_duplicates(subset=["Correo", "Plataforma"])
+        c_res = c_res[~c_res["IP_Region"].str.startswith("EXTRA")]
         d_res = (pd.to_datetime(c_res["Fecha_Pago"], errors="coerce") - hoy_pd).dt.days
         n_mat = int((d_res <= 5).sum())
 
@@ -555,6 +556,7 @@ if menu == "📌 Panel Diario":
         df_inv = leer_tabla("inventario", COLUMNAS_INV)
         if not df_inv.empty:
             c_uni = df_inv.drop_duplicates(subset=["Correo", "Plataforma"]).copy()
+            c_uni = c_uni[~c_uni["IP_Region"].str.startswith("EXTRA")].copy()
             c_uni["Fecha_Real"] = pd.to_datetime(c_uni["Fecha_Pago"], errors="coerce")
             p_pend = c_uni[(c_uni["Fecha_Real"].notna()) & ((c_uni["Fecha_Real"] - hoy_pd).dt.days <= 5)]
             if not p_pend.empty:
@@ -609,19 +611,48 @@ elif menu == "📦 Registrar Cuentas":
         lista_plataformas = ["NETFLIX", "SPOTIFY"]
         
     col1, col2 = st.columns(2)
+    matriz_padre = None
+    fecha_padre = date.today()
     with col1:
         plataforma = st.selectbox("Plataforma (Se añaden desde Finanzas)", lista_plataformas, key="reg_plat")
-        correo = st.text_input("Correo de la cuenta principal", key="reg_correo")
+        
+        # CAMBIO: perfil extra (con correo propio, pero se paga junto a otra matriz)
+        es_extra = st.checkbox("➕ Es un perfil extra (se paga junto a otra cuenta matriz)", key="reg_extra")
+        if es_extra:
+            df_inv_reg = leer_tabla("inventario", COLUMNAS_INV)
+            mats_reg = df_inv_reg[(df_inv_reg["Plataforma"] == plataforma) & (~df_inv_reg["IP_Region"].str.startswith("EXTRA"))].drop_duplicates(subset=["Correo"])
+            opciones_padre = mats_reg["Correo"].tolist()
+            if opciones_padre:
+                matriz_padre = st.selectbox("Cuenta matriz que lo paga", opciones_padre, key="reg_padre")
+                try:
+                    fecha_padre = pd.to_datetime(mats_reg[mats_reg["Correo"] == matriz_padre].iloc[0]["Fecha_Pago"]).date()
+                except:
+                    fecha_padre = date.today()
+            else:
+                st.warning(f"Primero registra la cuenta matriz de {plataforma}.")
+        
+        correo = st.text_input("Correo del perfil extra" if es_extra else "Correo de la cuenta principal", key="reg_correo")
         clave = st.text_input("Clave de la cuenta", key="reg_clave")
-        costo_matriz_input = st.number_input("Costo de esta cuenta ($)", min_value=0.0, step=0.5, key="reg_costo", help="Ponle 0 si es autopagable, o el monto que le pagaste al proveedor por esta cuenta en específico.")
-    with col2:
-        if plataforma == "SPOTIFY":
-            st.info("🎵 **Plan Familiar:** Se reservarán exactamente 6 cupos automáticamente.")
-            cantidad_perfiles = 6
+        if es_extra:
+            st.caption("💡 Costo $0: ya se paga en la factura de la matriz. Si el extra aumentó esa factura, sube el costo de la matriz en Soportes > Actualizar Credenciales.")
+            costo_matriz_input = 0.0
         else:
-            cantidad_perfiles = st.number_input("Perfiles a vender", min_value=1, max_value=15, value=5, key="reg_cant")
-        fecha_pago_cuenta = st.date_input("Día de próximo pago al proveedor", key="reg_fecha")
-        ip_region = st.text_input("IP / Región (Ej: USA, Autopagable)", key="reg_ip")
+            costo_matriz_input = st.number_input("Costo de esta cuenta ($)", min_value=0.0, step=0.5, key="reg_costo", help="Ponle 0 si es autopagable, o el monto que le pagaste al proveedor por esta cuenta en específico.")
+    with col2:
+        if es_extra:
+            st.info("➕ **Perfil extra:** se registra 1 perfil, con la fecha de pago de su matriz.")
+            cantidad_perfiles = 1
+            fecha_pago_cuenta = st.date_input("Día de próximo pago (el de la matriz)", value=fecha_padre, disabled=True, key="reg_fecha_extra")
+            ip_region = f"EXTRA de {matriz_padre}" if matriz_padre else "EXTRA"
+            st.text_input("IP / Región", value=ip_region, disabled=True, key="reg_ip_extra")
+        else:
+            if plataforma == "SPOTIFY":
+                st.info("🎵 **Plan Familiar:** Se reservarán exactamente 6 cupos automáticamente.")
+                cantidad_perfiles = 6
+            else:
+                cantidad_perfiles = st.number_input("Perfiles a vender", min_value=1, max_value=15, value=5, key="reg_cant")
+            fecha_pago_cuenta = st.date_input("Día de próximo pago al proveedor", key="reg_fecha")
+            ip_region = st.text_input("IP / Región (Ej: USA, Autopagable)", key="reg_ip")
         
     st.markdown("---")
     st.markdown(f"**Configuración rápida de los perfiles:**")
@@ -643,7 +674,9 @@ elif menu == "📦 Registrar Cuentas":
         perfiles_a_guardar.append({"nombre": nom, "pin": pin})
         
     if st.button("💾 Guardar Cuenta Matriz", type="primary", key="btn_guardar_matriz"):
-        if correo and clave:
+        if es_extra and not matriz_padre:
+            st.error("⚠️ Elige la cuenta matriz que paga este perfil extra.")
+        elif correo and clave:
             n_perf = []
             for item in perfiles_a_guardar:
                 n_perf.append({
@@ -1289,3 +1322,4 @@ elif menu == "⚙️ Configuración":
             type="primary",
             key="btn_backup"
         )
+        

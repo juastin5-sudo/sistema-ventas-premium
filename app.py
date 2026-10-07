@@ -331,6 +331,23 @@ def sumar_meses(fecha_obj, meses):
     dia = min(fecha_obj.day, calendar.monthrange(anio, mes)[1])
     return date(anio, mes, dia)
 
+# CAMBIO: ciclo de pago de las matrices y días de aviso
+DIAS_CICLO_MATRIZ = 31
+DIAS_AVISO_MATRIZ = 3
+
+def costo_con_extras(df_inv, plataforma, correo, costo_base):
+    """Costo de la matriz + el costo de sus perfiles extra. Devuelve (total, costo_extras, cantidad_extras)."""
+    ext = df_inv[(df_inv["Plataforma"] == plataforma) & (df_inv["IP_Region"] == f"EXTRA de {correo}")].drop_duplicates(subset=["Correo"])
+    c_ext = sum([to_float(x) for x in ext["Costo_Matriz"]])
+    return to_float(costo_base) + c_ext, c_ext, len(ext)
+
+def actualizar_fecha_pago(plataforma, correo, nueva_fecha):
+    """Mueve la fecha de pago de la matriz y la de sus extras."""
+    df = leer_tabla("inventario", COLUMNAS_INV)
+    df.loc[(df["Plataforma"] == plataforma) & (df["Correo"] == correo), "Fecha_Pago"] = str(nueva_fecha)
+    df.loc[(df["Plataforma"] == plataforma) & (df["IP_Region"] == f"EXTRA de {correo}"), "Fecha_Pago"] = str(nueva_fecha)
+    guardar_tabla("inventario", df, COLUMNAS_INV)
+
 # Variables de Sesión
 if 'pines_azar' not in st.session_state: st.session_state.pines_azar = [str(random.randint(1000, 9999)) for _ in range(50)]
 if 'carrito' not in st.session_state: st.session_state.carrito = []
@@ -429,11 +446,20 @@ if menu == "📌 Panel Diario":
     n_prox = act_res[(act_res["Dias"] > 0) & (act_res["Dias"] <= 3)]["Cliente"].nunique()
     por_cobrar = sum([to_float(x) for x in act_res[act_res["Dias"] <= 3]["Monto"]])
     n_mat = 0
+    total_mat = 0.0
+    avisos_mat = []
     if not df_inv_res.empty:
         c_res = df_inv_res.drop_duplicates(subset=["Correo", "Plataforma"])
-        c_res = c_res[~c_res["IP_Region"].str.startswith("EXTRA")]
-        d_res = (pd.to_datetime(c_res["Fecha_Pago"], errors="coerce") - hoy_pd).dt.days
-        n_mat = int((d_res <= 5).sum())
+        c_res = c_res[~c_res["IP_Region"].str.startswith("EXTRA")].copy()
+        c_res["Dias"] = (pd.to_datetime(c_res["Fecha_Pago"], errors="coerce") - hoy_pd).dt.days
+        c_urg = c_res[c_res["Dias"] <= DIAS_AVISO_MATRIZ].sort_values("Dias")
+        for _, r_m in c_urg.iterrows():
+            tot_m, _, _ = costo_con_extras(df_inv_res, r_m["Plataforma"], r_m["Correo"], r_m["Costo_Matriz"])
+            total_mat += tot_m
+            d_m = int(r_m["Dias"])
+            cuando = f"VENCIDA hace {abs(d_m)} días" if d_m < 0 else ("vence HOY" if d_m == 0 else f"vence en {d_m} días")
+            avisos_mat.append(f"- **{r_m['Plataforma']}** ({r_m['Correo']}): {cuando} | ${tot_m:.2f}")
+        n_mat = len(c_urg)
 
     r1, r2, r3, r4, r5 = st.columns(5)
     r1.metric("Clientes vencidos", n_venc)
@@ -441,6 +467,13 @@ if menu == "📌 Panel Diario":
     r3.metric("Próximos 3 días", n_prox)
     r4.metric("Por cobrar (USD)", f"${por_cobrar:,.2f}")
     r5.metric("Matrices por pagar", n_mat)
+
+    if avisos_mat:
+        st.warning(
+            f"⚠️ **Paga estas cuentas matrices para que no se caigan (aviso {DIAS_AVISO_MATRIZ} días antes):**\n\n"
+            + "\n".join(avisos_mat)
+            + f"\n\n**Total a pagar: ${total_mat:,.2f} | {total_mat * st.session_state.tasa_cambio:,.2f} Bs**"
+        )
 
     pendientes_activacion = df_clientes_raw[df_clientes_raw["Estado_Servicio"] == "Pendiente"]
     
@@ -558,21 +591,25 @@ if menu == "📌 Panel Diario":
             c_uni = df_inv.drop_duplicates(subset=["Correo", "Plataforma"]).copy()
             c_uni = c_uni[~c_uni["IP_Region"].str.startswith("EXTRA")].copy()
             c_uni["Fecha_Real"] = pd.to_datetime(c_uni["Fecha_Pago"], errors="coerce")
-            p_pend = c_uni[(c_uni["Fecha_Real"].notna()) & ((c_uni["Fecha_Real"] - hoy_pd).dt.days <= 5)]
+            p_pend = c_uni[(c_uni["Fecha_Real"].notna()) & ((c_uni["Fecha_Real"] - hoy_pd).dt.days <= DIAS_AVISO_MATRIZ)]
             if not p_pend.empty:
                 for idx, row in p_pend.sort_values(by="Fecha_Real").iterrows():
                     dias = (row["Fecha_Real"] - hoy_pd).days
                     est = f"🚨 VENCIDA hace {abs(dias)}d" if dias < 0 else ("🔥 PAGAR HOY" if dias == 0 else f"⏳ En {dias}d")
-                    c_mat = to_float(row.get("Costo_Matriz", 0.0))
-                    st.warning(f"**{row['Plataforma']}** | {est}\n\n💸 Costo: ${c_mat:.2f} | **{c_mat * st.session_state.tasa_cambio:,.2f} Bs**")
+                    c_mat, c_extra, n_extra = costo_con_extras(df_inv, row["Plataforma"], row["Correo"], row.get("Costo_Matriz", 0.0))
+                    txt_extra = f" (incluye ${c_extra:.2f} de {n_extra} extra)" if c_extra > 0 else ""
+                    st.warning(f"**{row['Plataforma']}** | {est}\n\n💸 Costo: ${c_mat:.2f}{txt_extra} | **{c_mat * st.session_state.tasa_cambio:,.2f} Bs**")
                     with st.expander(f"📋 Ver Credenciales"):
                         st.code(row["Correo"], language="markdown")
                         st.code(row["Clave"], language="markdown")
-                        n_f = st.date_input("Próximo pago:", value=row["Fecha_Real"].date(), key=f"fm_{str(idx)}")
-                        if st.button("💾 Guardar Pago", key=f"bm_{str(idx)}"):
-                            df_f_i = leer_tabla("inventario", COLUMNAS_INV)
-                            df_f_i.loc[(df_f_i["Correo"] == row["Correo"]) & (df_f_i["Plataforma"] == row["Plataforma"]), "Fecha_Pago"] = str(n_f)
-                            guardar_tabla("inventario", df_f_i, COLUMNAS_INV)
+                        base_pago = max(row["Fecha_Real"].date(), date.today())
+                        nueva_31 = base_pago + timedelta(days=DIAS_CICLO_MATRIZ)
+                        if st.button(f"✅ Ya pagué (próximo pago: {nueva_31.strftime('%d/%m/%Y')})", key=f"bp31_{str(idx)}", type="primary"):
+                            actualizar_fecha_pago(row["Plataforma"], row["Correo"], nueva_31)
+                            st.rerun()
+                        n_f = st.date_input("O elige otra fecha:", value=row["Fecha_Real"].date(), key=f"fm_{str(idx)}")
+                        if st.button("💾 Guardar Fecha", key=f"bm_{str(idx)}"):
+                            actualizar_fecha_pago(row["Plataforma"], row["Correo"], n_f)
                             st.rerun()
                 st.markdown("---")
             else:
@@ -634,13 +671,13 @@ elif menu == "📦 Registrar Cuentas":
         correo = st.text_input("Correo del perfil extra" if es_extra else "Correo de la cuenta principal", key="reg_correo")
         clave = st.text_input("Clave de la cuenta", key="reg_clave")
         if es_extra:
-            st.caption("💡 Costo $0: ya se paga en la factura de la matriz. Si el extra aumentó esa factura, sube el costo de la matriz en Soportes > Actualizar Credenciales.")
-            costo_matriz_input = 0.0
+            costo_matriz_input = st.number_input("Costo del extra ($)", min_value=0.0, step=0.5, key="reg_costo_extra", help="Lo que cuesta este extra en la factura de la matriz (Ej: 3).")
+            st.caption("💡 Este costo se suma al pago de la cuenta matriz en el Panel Diario.")
         else:
             costo_matriz_input = st.number_input("Costo de esta cuenta ($)", min_value=0.0, step=0.5, key="reg_costo", help="Ponle 0 si es autopagable, o el monto que le pagaste al proveedor por esta cuenta en específico.")
     with col2:
         if es_extra:
-            st.info("➕ **Perfil extra:** se registra 1 perfil, con la fecha de pago de su matriz.")
+            st.info("➕ **Perfil extra:** se registra 1 perfil, con la fecha de pago de su matriz y su propio costo.")
             cantidad_perfiles = 1
             fecha_pago_cuenta = st.date_input("Día de próximo pago (el de la matriz)", value=fecha_padre, disabled=True, key="reg_fecha_extra")
             ip_region = f"EXTRA de {matriz_padre}" if matriz_padre else "EXTRA"
@@ -651,7 +688,7 @@ elif menu == "📦 Registrar Cuentas":
                 cantidad_perfiles = 6
             else:
                 cantidad_perfiles = st.number_input("Perfiles a vender", min_value=1, max_value=15, value=5, key="reg_cant")
-            fecha_pago_cuenta = st.date_input("Día de próximo pago al proveedor", key="reg_fecha")
+            fecha_pago_cuenta = st.date_input("Día de próximo pago al proveedor (por defecto, 31 días)", value=date.today() + timedelta(days=DIAS_CICLO_MATRIZ), key="reg_fecha")
             ip_region = st.text_input("IP / Región (Ej: USA, Autopagable)", key="reg_ip")
         
     st.markdown("---")
@@ -1256,6 +1293,8 @@ elif menu == "🛠️ Soportes":
                             df_inv_cred.loc[mask_inv, "Correo"] = nuevo_correo
                             df_inv_cred.loc[mask_inv, "Clave"] = nueva_clave
                             df_inv_cred.loc[mask_inv, "Costo_Matriz"] = str(nuevo_costo)
+                            mask_ext = (df_inv_cred["Plataforma"] == plat_sel) & (df_inv_cred["IP_Region"] == f"EXTRA de {corr_sel}")
+                            df_inv_cred.loc[mask_ext, "IP_Region"] = f"EXTRA de {nuevo_correo}"
                             
                             mask_cli = (df_cli_cred["Plataforma"] == plat_sel) & (df_cli_cred["Correo"] == corr_sel)
                             df_cli_cred.loc[mask_cli, "Correo"] = nuevo_correo
@@ -1322,4 +1361,3 @@ elif menu == "⚙️ Configuración":
             type="primary",
             key="btn_backup"
         )
-        

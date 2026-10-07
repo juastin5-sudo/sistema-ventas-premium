@@ -147,6 +147,42 @@ st.markdown("""
             border: none !important;
             background-color: #1b1932 !important;
         }
+        .block-container { padding-top: 2.2rem !important; max-width: 1300px !important; }
+
+        /* Menú lateral tipo app */
+        [data-testid="stSidebar"] div[role="radiogroup"] { gap: 4px !important; }
+        [data-testid="stSidebar"] div[role="radiogroup"] label {
+            padding: 0.7rem 0.9rem !important;
+            border-radius: 10px !important;
+            width: 100% !important;
+            cursor: pointer !important;
+            border-left: 3px solid transparent !important;
+            transition: background 0.2s ease !important;
+        }
+        [data-testid="stSidebar"] div[role="radiogroup"] label:hover {
+            background: rgba(139, 92, 246, 0.12) !important;
+        }
+        [data-testid="stSidebar"] div[role="radiogroup"] label > div:first-child { display: none !important; }
+        [data-testid="stSidebar"] div[role="radiogroup"] label p { font-weight: 500 !important; font-size: 0.95rem !important; }
+        [data-testid="stSidebar"] div[role="radiogroup"] label:has(input:checked) {
+            background: linear-gradient(135deg, rgba(139, 92, 246, 0.28), rgba(59, 130, 246, 0.18)) !important;
+            border-left: 3px solid #8B5CF6 !important;
+        }
+        [data-testid="stSidebar"] div[role="radiogroup"] label:has(input:checked) p { color: #ffffff !important; font-weight: 600 !important; }
+
+        .marca-lateral { padding: 0.4rem 0.4rem 1.2rem 0.4rem; margin-bottom: 0.8rem; border-bottom: 1px solid rgba(255,255,255,0.06); }
+        .marca-lateral .nombre { font-family: 'Space Grotesk', sans-serif; font-size: 1.25rem; font-weight: 700; color: #ffffff; }
+        .marca-lateral .sub { font-size: 0.8rem; color: #9a98c0; margin-top: 2px; }
+        .caja-tasa { background: rgba(139, 92, 246, 0.1); border: 1px solid rgba(139, 92, 246, 0.25); border-radius: 12px; padding: 0.8rem 1rem; margin: 1rem 0 0.8rem 0; }
+        .caja-tasa .et { font-size: 0.75rem; color: #9a98c0; }
+        .caja-tasa .val { font-family: 'Space Grotesk', sans-serif; font-size: 1.3rem; font-weight: 700; color: #ffffff; }
+
+        /* Tablas más limpias */
+        [data-testid="stTable"] table { border-collapse: collapse !important; width: 100% !important; }
+        [data-testid="stTable"] th { background: #17152e !important; color: #a9a7cf !important; font-weight: 600 !important; text-align: left !important; padding: 0.7rem 0.9rem !important; border-bottom: 1px solid #2a2750 !important; }
+        [data-testid="stTable"] td { padding: 0.65rem 0.9rem !important; border-bottom: 1px solid rgba(255,255,255,0.04) !important; }
+        [data-testid="stTable"] tr:hover td { background: rgba(139, 92, 246, 0.06) !important; }
+
         hr { border-color: rgba(255, 255, 255, 0.05) !important; margin: 2.5rem 0 !important; }
     </style>
 """, unsafe_allow_html=True)
@@ -343,15 +379,34 @@ inicializar_archivos()
 # ==============================================================================
 # 3. NAVEGACIÓN LATERAL
 # ==============================================================================
-st.sidebar.title("Navegación 🧭")
+st.sidebar.markdown("""
+    <div class="marca-lateral">
+        <div class="nombre">📺 Streaming Manager</div>
+        <div class="sub">Gestión de cuentas y clientes</div>
+    </div>
+""", unsafe_allow_html=True)
+
 menu = st.sidebar.radio(
     "Menú Principal", 
-    ["📌 Panel Diario", "📦 1. Registrar Cuentas", "🛒 2. Vender Perfiles", "🗃️ 3. Base de Datos", "💰 4. Finanzas", "🛠️ 5. Soportes", "⚙️ 6. Configuración"],
+    ["📌 Panel Diario", "📦 Registrar Cuentas", "🛒 Vender Perfiles", "🗃️ Base de Datos", "💰 Finanzas", "🛠️ Soportes", "⚙️ Configuración"],
     key="nav_principal",
     label_visibility="collapsed"
 )
-st.sidebar.markdown("---")
+
+st.sidebar.markdown(f"""
+    <div class="caja-tasa">
+        <div class="et">Tasa activa</div>
+        <div class="val">{st.session_state.tasa_cambio:,.2f} Bs / USD</div>
+    </div>
+""", unsafe_allow_html=True)
+
+if st.secrets.get("APP_PASSWORD", ""):
+    if st.sidebar.button("🔒 Cerrar sesión", key="btn_logout", type="secondary"):
+        st.session_state.autenticado = False
+        st.rerun()
+
 st.title("Panel Central de Cuentas")
+st.caption(f"Hoy es {date.today().strftime('%d/%m/%Y')}")
 
 # ==============================================================================
 # MÓDULO 0: PANEL DIARIO 
@@ -545,7 +600,7 @@ if menu == "📌 Panel Diario":
 # ==============================================================================
 # MÓDULO 1: REGISTRAR CUENTAS 
 # ==============================================================================
-elif menu == "📦 1. Registrar Cuentas":
+elif menu == "📦 Registrar Cuentas":
     st.subheader("Ingresar nueva cuenta al inventario")
     
     df_precios_act = leer_tabla("precios", COLUMNAS_PRE)
@@ -555,7 +610,7 @@ elif menu == "📦 1. Registrar Cuentas":
         
     col1, col2 = st.columns(2)
     with col1:
-        plataforma = st.selectbox("Plataforma (Se añaden desde Módulo 4: Finanzas)", lista_plataformas, key="reg_plat")
+        plataforma = st.selectbox("Plataforma (Se añaden desde Finanzas)", lista_plataformas, key="reg_plat")
         correo = st.text_input("Correo de la cuenta principal", key="reg_correo")
         clave = st.text_input("Clave de la cuenta", key="reg_clave")
         costo_matriz_input = st.number_input("Costo de esta cuenta ($)", min_value=0.0, step=0.5, key="reg_costo", help="Ponle 0 si es autopagable, o el monto que le pagaste al proveedor por esta cuenta en específico.")
@@ -605,7 +660,7 @@ elif menu == "📦 1. Registrar Cuentas":
 # ==============================================================================
 # MÓDULO 2: VENTAS 
 # ==============================================================================
-elif menu == "🛒 2. Vender Perfiles":
+elif menu == "🛒 Vender Perfiles":
     st.subheader("🛍️ Armar Combo de Ventas")
     
     if "m_exito" in st.session_state:
@@ -776,7 +831,7 @@ elif menu == "🛒 2. Vender Perfiles":
 # ==============================================================================
 # MÓDULO 3: BASE DE DATOS
 # ==============================================================================
-elif menu == "🗃️ 3. Base de Datos":
+elif menu == "🗃️ Base de Datos":
     st.header("🗃️ Gestor de Bases de Datos")
     
     opcion_bd = st.radio("Selecciona la Base de Datos a visualizar:", ["👥 Base de Clientes Activos", "📦 Inventario Completo de Cuentas"], horizontal=True, label_visibility="collapsed", key="bd_radio")
@@ -894,7 +949,7 @@ elif menu == "🗃️ 3. Base de Datos":
 # ==============================================================================
 # MÓDULO 4: FINANZAS 
 # ==============================================================================
-elif menu == "💰 4. Finanzas":
+elif menu == "💰 Finanzas":
     st.header("Centro de Precios y Contabilidad 📊")
     
     st.markdown("### 💱 Tasa de Cambio Oficial")
@@ -997,7 +1052,7 @@ elif menu == "💰 4. Finanzas":
 # ==============================================================================
 # MÓDULO 5: SOPORTES
 # ==============================================================================
-elif menu == "🛠️ 5. Soportes":
+elif menu == "🛠️ Soportes":
     st.header("Soporte Técnico 🛠️")
     
     opcion_soporte = st.radio(
@@ -1181,7 +1236,7 @@ elif menu == "🛠️ 5. Soportes":
 # ==============================================================================
 # MÓDULO 6: CONFIGURACIÓN Y BACKUPS
 # ==============================================================================
-elif menu == "⚙️ 6. Configuración":
+elif menu == "⚙️ Configuración":
     st.header("⚙️ Editor Maestro de Mensajes")
     st.info("💡 **Etiquetas:** `[cliente]`, `[servicios]`, `[monto_usd]`, `[monto_bs]`, `[plataforma]`, `[correo]`, `[clave]`, `[perfil]`, `[pin]`, `[fecha_corte]`.")
     

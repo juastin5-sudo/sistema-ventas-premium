@@ -227,16 +227,22 @@ def leer_tabla(tabla, columnas):
 def guardar_tabla(tabla, df, columnas):
     try:
         url_del = f"{st.secrets['SUPABASE_URL']}/rest/v1/{tabla}?{columnas[0]}=not.eq.VALOR_INEXISTENTE"
-        requests.delete(url_del, headers=get_headers(), timeout=10)
-        
+        r_del = requests.delete(url_del, headers=get_headers(), timeout=10)
+        if r_del.status_code >= 300:
+            st.error(f"Error al borrar en {tabla}: {r_del.status_code} - {r_del.text}")
+            st.cache_data.clear()
+            return
+
         if not df.empty:
             df_clean = df[columnas].fillna("").astype(str)
             records = df_clean.to_dict(orient="records")
             url_ins = f"{st.secrets['SUPABASE_URL']}/rest/v1/{tabla}"
-            requests.post(url_ins, headers=get_headers(), json=records, timeout=10)
+            r_ins = requests.post(url_ins, headers=get_headers(), json=records, timeout=10)
+            if r_ins.status_code >= 300:
+                st.error(f"Error al guardar en {tabla}: {r_ins.status_code} - {r_ins.text}")
     except Exception as e:
         st.error(f"Error de conexión: {e}")
-    st.cache_data.clear()  # CAMBIO: refresca los datos tras guardar
+    st.cache_data.clear()
 
 def agregar_filas(tabla, df, columnas):
     try:
@@ -244,10 +250,17 @@ def agregar_filas(tabla, df, columnas):
             df_clean = df[columnas].fillna("").astype(str)
             records = df_clean.to_dict(orient="records")
             url_ins = f"{st.secrets['SUPABASE_URL']}/rest/v1/{tabla}"
-            requests.post(url_ins, headers=get_headers(), json=records, timeout=10)
+            r = requests.post(url_ins, headers=get_headers(), json=records, timeout=10)
+            if r.status_code >= 300:
+                st.error(f"Error al guardar en {tabla}: {r.status_code} - {r.text}")
+                st.cache_data.clear()
+                return False
     except Exception as e:
         st.error(f"Error insertando: {e}")
-    st.cache_data.clear()  # CAMBIO: refresca los datos tras agregar
+        st.cache_data.clear()
+        return False
+    st.cache_data.clear()
+    return True
 
 def obtener_tasa_binance():
     url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
@@ -555,10 +568,10 @@ elif menu == "📦 1. Registrar Cuentas":
                     "Estado": "Disponible", "Fecha_Pago": str(fecha_pago_cuenta), "IP_Region": ip_region,
                     "Costo_Matriz": str(costo_matriz_input)
                 })
-            agregar_filas("inventario", pd.DataFrame(n_perf), COLUMNAS_INV)
-            st.success("¡Cuenta guardada exitosamente en la Base de Datos de la nube!")
-            st.session_state.pines_azar = [str(random.randint(1000, 9999)) for _ in range(50)]
-            st.rerun()
+            ok = agregar_filas("inventario", pd.DataFrame(n_perf), COLUMNAS_INV)
+            if ok:
+                st.success("¡Cuenta guardada exitosamente en la Base de Datos de la nube!")
+                st.session_state.pines_azar = [str(random.randint(1000, 9999)) for _ in range(50)]
 
 # ==============================================================================
 # MÓDULO 2: VENTAS 

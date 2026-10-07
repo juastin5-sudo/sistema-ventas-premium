@@ -31,18 +31,18 @@ st.markdown("""
         footer {visibility: hidden;}
         
         .stApp {
-            background: radial-gradient(circle at 50% 0%, #1a1b26 0%, #0a0b10 80%) !important;
+            background: radial-gradient(circle at 50% 0%, #1f1a45 0%, #0a0919 80%) !important;
             color: #f1f1f4 !important;
         }
 
         [data-testid="stSidebar"] {
-            background-color: #0e0f16 !important;
+            background-color: #0d0c20 !important;
             border-right: 1px solid rgba(255, 255, 255, 0.04) !important;
             box-shadow: 4px 0 24px rgba(0, 0, 0, 0.25) !important;
         }
         
         h1 {
-            background: linear-gradient(135deg, #00FF7F 0%, #00BFFF 100%);
+            background: linear-gradient(135deg, #8B5CF6 0%, #3B82F6 100%);
             -webkit-background-clip: text;
             -webkit-background-color: transparent;
             -webkit-text-fill-color: transparent;
@@ -54,7 +54,7 @@ st.markdown("""
         h2 { font-weight: 700 !important; color: #ffffff !important; }
 
         div[data-testid="stForm"] {
-            background-color: #141522 !important;
+            background-color: #17152e !important;
             border: 1px solid rgba(255, 255, 255, 0.05) !important;
             border-radius: 16px !important;
             padding: 2rem !important;
@@ -70,8 +70,12 @@ st.markdown("""
             transition: all 0.3s ease !important;
         }
         
+        div[data-testid="stMetric"] {
+            border-left: 3px solid #8B5CF6 !important;
+        }
+        
         div[data-testid="stMetric"]:hover {
-            border-color: rgba(0, 255, 127, 0.2) !important;
+            border-color: rgba(139, 92, 246, 0.35) !important;
             background: rgba(255, 255, 255, 0.03) !important;
             transform: translateY(-2px);
         }
@@ -97,24 +101,24 @@ st.markdown("""
         }
         
         .stButton > button[kind="primary"] {
-            background: linear-gradient(135deg, #00FF7F 0%, #00BFFF 100%) !important;
-            color: #0a0b10 !important;
+            background: linear-gradient(135deg, #8B5CF6 0%, #3B82F6 100%) !important;
+            color: #ffffff !important;
             border: none !important;
         }
         
         .stButton > button[kind="primary"]:hover {
-            box-shadow: 0 0 25px rgba(0, 255, 127, 0.45) !important;
+            box-shadow: 0 0 25px rgba(139, 92, 246, 0.5) !important;
             transform: translateY(-2px) !important;
         }
         
         .stButton > button[kind="secondary"] {
-            background-color: #1e2030 !important;
+            background-color: #221f40 !important;
             color: #ffffff !important;
             border: 1px solid rgba(255, 255, 255, 0.08) !important;
         }
         
         .stButton > button[kind="secondary"]:hover {
-            background-color: #27293d !important;
+            background-color: #2d2a52 !important;
             border-color: rgba(255, 255, 255, 0.25) !important;
             transform: translateY(-2px) !important;
         }
@@ -122,26 +126,26 @@ st.markdown("""
         .stTextInput > div > div > input, .stTextArea > div > div > textarea,
         .stSelectbox > div > div > div, .stNumberInput > div > div > input {
             border-radius: 10px !important;
-            border: 1px solid #222436 !important;
-            background-color: #141522 !important;
+            border: 1px solid #2a2750 !important;
+            background-color: #17152e !important;
             color: #ffffff !important;
         }
         
         .stTextInput > div > div > input:focus, .stTextArea > div > div > textarea:focus {
-            border-color: #00FF7F !important; box-shadow: 0 0 0 1px #00FF7F !important;
+            border-color: #8B5CF6 !important; box-shadow: 0 0 0 1px #8B5CF6 !important;
         }
 
         pre {
             border-radius: 12px !important;
-            background-color: #0b0c13 !important;
-            border: 1px solid #1c1d2a !important;
+            background-color: #0c0b1c !important;
+            border: 1px solid #26234a !important;
             padding: 1.2rem !important;
         }
 
         div[data-testid="stAlert"] {
             border-radius: 14px !important;
             border: none !important;
-            background-color: #181926 !important;
+            background-color: #1b1932 !important;
         }
         hr { border-color: rgba(255, 255, 255, 0.05) !important; margin: 2.5rem 0 !important; }
     </style>
@@ -357,6 +361,31 @@ if menu == "📌 Panel Diario":
     hoy_pd = pd.to_datetime("today").normalize()
     
     df_clientes_raw = leer_tabla("clientes", COLUMNAS_CLI)
+
+    # CAMBIO: tarjetas de resumen arriba
+    df_inv_res = leer_tabla("inventario", COLUMNAS_INV)
+    act_res = df_clientes_raw[df_clientes_raw["Estado_Servicio"] == "Activo"].copy()
+    if act_res.empty:
+        act_res["Dias"] = 0
+    else:
+        act_res["Dias"] = (pd.to_datetime(act_res["Fecha_Corte"], errors="coerce") - hoy_pd).dt.days
+    n_venc = act_res[act_res["Dias"] < 0]["Cliente"].nunique()
+    n_hoy = act_res[act_res["Dias"] == 0]["Cliente"].nunique()
+    n_prox = act_res[(act_res["Dias"] > 0) & (act_res["Dias"] <= 3)]["Cliente"].nunique()
+    por_cobrar = sum([to_float(x) for x in act_res[act_res["Dias"] <= 3]["Monto"]])
+    n_mat = 0
+    if not df_inv_res.empty:
+        c_res = df_inv_res.drop_duplicates(subset=["Correo", "Plataforma"])
+        d_res = (pd.to_datetime(c_res["Fecha_Pago"], errors="coerce") - hoy_pd).dt.days
+        n_mat = int((d_res <= 5).sum())
+
+    r1, r2, r3, r4, r5 = st.columns(5)
+    r1.metric("Clientes vencidos", n_venc)
+    r2.metric("Cobran hoy", n_hoy)
+    r3.metric("Próximos 3 días", n_prox)
+    r4.metric("Por cobrar (USD)", f"${por_cobrar:,.2f}")
+    r5.metric("Matrices por pagar", n_mat)
+
     pendientes_activacion = df_clientes_raw[df_clientes_raw["Estado_Servicio"] == "Pendiente"]
     
     if not pendientes_activacion.empty:

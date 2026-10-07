@@ -215,6 +215,7 @@ verificar_acceso()
 COLUMNAS_INV = ["Plataforma", "Correo", "Clave", "Perfil_Pantalla", "PIN", "Estado", "Fecha_Pago", "IP_Region", "Costo_Matriz"]
 COLUMNAS_CLI = ["Cliente", "Telefono", "Plataforma", "Correo", "Perfil_Pantalla", "Fecha_Inicio", "Fecha_Corte", "Metodo_Pago", "Monto", "Clave_Spotify", "Estado_Servicio", "Fecha_Congelamiento", "Meses_Contratados"]
 COLUMNAS_PRE = ["Plataforma", "Costo_Matriz", "Precio_Venta_Perfil"]
+COLUMNAS_PAG = ["Fecha", "Cliente", "Plataforma", "Correo", "Perfil_Pantalla", "Monto", "Metodo_Pago", "Meses", "Tipo"]
 ARCHIVO_PLANTILLAS = "plantillas.json"
 
 def get_headers():
@@ -331,6 +332,15 @@ def sumar_meses(fecha_obj, meses):
     dia = min(fecha_obj.day, calendar.monthrange(anio, mes)[1])
     return date(anio, mes, dia)
 
+def registrar_pagos(lista):
+    """Guarda cada cobro (venta o renovación) en el historial de pagos."""
+    if not lista:
+        return True
+    ok = agregar_filas("pagos", pd.DataFrame(lista), COLUMNAS_PAG)
+    if not ok:
+        st.session_state.error_pagos = "⚠️ La venta se guardó, pero NO se pudo anotar en el historial de pagos. Revisa que la tabla 'pagos' exista en Supabase."
+    return ok
+
 # CAMBIO: ciclo de pago de las matrices y días de aviso
 DIAS_CICLO_MATRIZ = 31
 DIAS_AVISO_MATRIZ = 3
@@ -424,6 +434,8 @@ if st.secrets.get("APP_PASSWORD", ""):
 
 st.title("Panel Central de Cuentas")
 st.caption(f"Hoy es {date.today().strftime('%d/%m/%Y')}")
+if "error_pagos" in st.session_state:
+    st.error(st.session_state.pop("error_pagos"))
 
 # ==============================================================================
 # MÓDULO 0: PANEL DIARIO 
@@ -551,6 +563,7 @@ if menu == "📌 Panel Diario":
                             meses_ren = st.number_input("Meses", min_value=1, max_value=12, value=1, key=f"mren_{cli}")
                         with c_r2:
                             opc = st.selectbox("Acción:", ["---", "✅ Sí Renovó (Extender)", "❌ No Renovó (Cortar)"], key=f"acc_{cli}")
+                        monto_recibido = st.number_input("Monto total recibido ($). Déjalo en 0 para usar el precio normal", min_value=0.0, step=0.5, value=0.0, key=f"mrec_{cli}")
                         
                         if st.form_submit_button("⚡ Procesar", type="primary"):
                             if opc == "---":
@@ -561,11 +574,26 @@ if menu == "📌 Panel Diario":
                                 df_full_cli = df_clientes_raw.copy()
                                 df_full_inv = leer_tabla("inventario", COLUMNAS_INV)
                                 if "Sí Renovó" in opc:
+                                    pagos_ren = []
                                     for idx_row in checklines_seleccionados:
                                         f_vieja = datetime.strptime(df_full_cli.loc[idx_row, "Fecha_Corte"], "%Y-%m-%d").date()
+                                        meses_prev = max(int(to_float(df_full_cli.loc[idx_row, "Meses_Contratados"])), 1)
+                                        monto_prev = to_float(df_full_cli.loc[idx_row, "Monto"])
+                                        if monto_recibido > 0:
+                                            monto_ren = monto_recibido / len(checklines_seleccionados)
+                                        else:
+                                            monto_ren = monto_prev / meses_prev * meses_ren
                                         df_full_cli.at[idx_row, "Meses_Contratados"] = str(meses_ren)
                                         df_full_cli.at[idx_row, "Fecha_Corte"] = str(sumar_meses(f_vieja, meses_ren))
+                                        df_full_cli.at[idx_row, "Monto"] = str(round(monto_ren, 2))
+                                        pagos_ren.append({
+                                            "Fecha": str(date.today()), "Cliente": df_full_cli.loc[idx_row, "Cliente"],
+                                            "Plataforma": df_full_cli.loc[idx_row, "Plataforma"], "Correo": df_full_cli.loc[idx_row, "Correo"],
+                                            "Perfil_Pantalla": df_full_cli.loc[idx_row, "Perfil_Pantalla"], "Monto": str(round(monto_ren, 2)),
+                                            "Metodo_Pago": df_full_cli.loc[idx_row, "Metodo_Pago"], "Meses": str(meses_ren), "Tipo": "Renovación"
+                                        })
                                     guardar_tabla("clientes", df_full_cli, COLUMNAS_CLI)
+                                    registrar_pagos(pagos_ren)
                                     st.rerun()
                                 elif "No Renovó" in opc:
                                     i_borrar = []
@@ -869,6 +897,7 @@ elif menu == "🛒 Vender Perfiles":
                         m_div = round(m_tot / len(st.session_state.carrito), 2)
                         m_uni = ""
                         f_nuevas = []
+                        p_nuevos = []
                         e_ini = "Activo" if act_ya else "Pendiente"
                         r_ven = cargar_plantilla("venta")
                         f_base = date.today()
@@ -883,6 +912,13 @@ elif menu == "🛒 Vender Perfiles":
                                 "Estado_Servicio": e_ini, "Fecha_Congelamiento": "", "Meses_Contratados": str(i["Meses"])
                             })
                             
+                            p_nuevos.append({
+                                "Fecha": str(f_base), "Cliente": cli, "Plataforma": i["Plataforma"],
+                                "Correo": i["Correo_Matriz"] if not i["Correo_Cliente"] else i["Correo_Cliente"],
+                                "Perfil_Pantalla": i["Perfil_Pantalla"], "Monto": str(m_div),
+                                "Metodo_Pago": met, "Meses": str(i["Meses"]), "Tipo": "Venta"
+                            })
+                            
                             idx = i["index_original"]
                             df_inv_actual.at[idx, "Estado"] = "Ocupado"
                             df_inv_actual.at[idx, "PIN"] = i["PIN"]
@@ -893,6 +929,7 @@ elif menu == "🛒 Vender Perfiles":
                         
                         agregar_filas("clientes", pd.DataFrame(f_nuevas), COLUMNAS_CLI)
                         guardar_tabla("inventario", df_inv_actual, COLUMNAS_INV)
+                        registrar_pagos(p_nuevos)
                         st.session_state.m_exito = "¡Venta Guardada!"
                         st.session_state.m_copia = m_uni.strip()
                         st.session_state.carrito = []
@@ -1069,12 +1106,46 @@ elif menu == "💰 Finanzas":
     st.markdown("---")
     df_inv = leer_tabla("inventario", COLUMNAS_INV)
     df_cli = leer_tabla("clientes", COLUMNAS_CLI)
-    
+    df_pag = leer_tabla("pagos", COLUMNAS_PAG)
+
+    with st.expander("📥 Importar ventas actuales al historial (hazlo una sola vez)"):
+        st.caption("Copia tus clientes actuales al historial de pagos, para que no empiecen en cero. No duplica lo que ya esté anotado.")
+        if st.button("📥 Importar ahora", key="btn_imp_pagos", type="secondary"):
+            base_imp = df_cli[df_cli["Estado_Servicio"] != "Pendiente"]
+            existentes = set(zip(df_pag["Cliente"], df_pag["Plataforma"], df_pag["Perfil_Pantalla"], df_pag["Fecha"]))
+            nuevos_imp = []
+            for _, r_c in base_imp.iterrows():
+                if (r_c["Cliente"], r_c["Plataforma"], r_c["Perfil_Pantalla"], r_c["Fecha_Inicio"]) in existentes:
+                    continue
+                nuevos_imp.append({
+                    "Fecha": r_c["Fecha_Inicio"], "Cliente": r_c["Cliente"], "Plataforma": r_c["Plataforma"],
+                    "Correo": r_c["Correo"], "Perfil_Pantalla": r_c["Perfil_Pantalla"], "Monto": r_c["Monto"],
+                    "Metodo_Pago": r_c["Metodo_Pago"], "Meses": r_c["Meses_Contratados"], "Tipo": "Importado"
+                })
+            if nuevos_imp:
+                if agregar_filas("pagos", pd.DataFrame(nuevos_imp), COLUMNAS_PAG):
+                    st.success(f"¡Listo! Se importaron {len(nuevos_imp)} pagos.")
+                    st.rerun()
+            else:
+                st.info("No hay nada nuevo que importar.")
+
+    # Mes a revisar
+    df_pag["Fecha_Real"] = pd.to_datetime(df_pag["Fecha"], errors="coerce")
+    df_pag["Mes"] = df_pag["Fecha_Real"].dt.strftime("%Y-%m")
+    df_pag["Monto_f"] = df_pag["Monto"].apply(to_float).astype(float)
+    meses_disp = sorted([m for m in df_pag["Mes"].dropna().unique().tolist()], reverse=True)
+    mes_actual = date.today().strftime("%Y-%m")
+    if mes_actual not in meses_disp:
+        meses_disp.insert(0, mes_actual)
+    mes_sel = st.selectbox("📅 Mes a revisar", meses_disp, key="fin_mes")
+    df_mes = df_pag[df_pag["Mes"] == mes_sel]
+
     st.markdown("### 📊 Rentabilidad Detallada por Plataforma")
+    st.caption("Ingresos: pagos recibidos en el mes elegido. Costos: lo que cuestan hoy tus cuentas matrices por mes (31 días).")
     datos_finanzas = []
     
     for plat in df_pre["Plataforma"].unique():
-        ing_plat = sum([to_float(x) for x in df_cli[(df_cli["Plataforma"] == plat) & (df_cli["Estado_Servicio"] != "Pendiente")]["Monto"]]) if not df_cli.empty else 0.0
+        ing_plat = float(df_mes[df_mes["Plataforma"] == plat]["Monto_f"].sum())
         
         if not df_inv.empty:
             matrices_unicas = df_inv[df_inv["Plataforma"] == plat].drop_duplicates(subset=["Correo"])
@@ -1085,7 +1156,7 @@ elif menu == "💰 Finanzas":
         if cost_plat > 0 or ing_plat > 0:
             datos_finanzas.append({
                 "Plataforma": plat, 
-                "Ingresos Totales": f"${ing_plat:.2f}", 
+                "Ingresos del mes": f"${ing_plat:.2f}", 
                 "Costos Proveedor": f"${cost_plat:.2f}", 
                 "Ganancia Neta": f"${ing_plat - cost_plat:.2f}"
             })
@@ -1097,7 +1168,7 @@ elif menu == "💰 Finanzas":
 
     st.markdown("---")
     
-    ingresos_t = sum([to_float(x) for x in df_cli[df_cli["Estado_Servicio"] != "Pendiente"]["Monto"]]) if not df_cli.empty else 0.0
+    ingresos_t = float(df_mes["Monto_f"].sum())
     
     if not df_inv.empty:
         matrices_todas = df_inv.drop_duplicates(subset=["Correo", "Plataforma"])
@@ -1108,16 +1179,29 @@ elif menu == "💰 Finanzas":
     ganancia_t = ingresos_t - costos_t
     ts = st.session_state.tasa_cambio
     
-    st.markdown("### 📈 Balance Contable Global")
+    st.markdown(f"### 📈 Balance del mes ({mes_sel})")
     m1, m2, m3 = st.columns(3)
-    m1.metric("💵 Total Ingresos USD", f"${ingresos_t:,.2f}")
-    m2.metric("💵 Total Costos USD", f"${costos_t:,.2f}")
+    m1.metric("💵 Ingresos USD", f"${ingresos_t:,.2f}")
+    m2.metric("💵 Costos USD", f"${costos_t:,.2f}")
     m3.metric("💵 Ganancia Neta USD", f"${ganancia_t:,.2f}")
     
     mb1, mb2, mb3 = st.columns(3)
-    mb1.metric("🇻🇪 Total Ingresos Bs", f"{ingresos_t * ts:,.2f} Bs")
-    mb2.metric("🇻🇪 Total Costos Bs", f"{costos_t * ts:,.2f} Bs")
+    mb1.metric("🇻🇪 Ingresos Bs", f"{ingresos_t * ts:,.2f} Bs")
+    mb2.metric("🇻🇪 Costos Bs", f"{costos_t * ts:,.2f} Bs")
     mb3.metric("🇻🇪 Ganancia Neta Bs", f"{ganancia_t * ts:,.2f} Bs")
+
+    if not df_pag.empty:
+        st.markdown("### 🗓️ Ingresos por mes")
+        res_mes = df_pag.dropna(subset=["Mes"]).groupby("Mes")["Monto_f"].sum().reset_index().sort_values("Mes", ascending=False).head(12)
+        res_mes["Monto_f"] = res_mes["Monto_f"].apply(lambda v: f"${v:,.2f}")
+        res_mes.columns = ["Mes", "Ingresos"]
+        st.table(res_mes)
+
+    with st.expander(f"🧾 Ver los pagos de {mes_sel}"):
+        if df_mes.empty:
+            st.write("No hay pagos anotados en este mes.")
+        else:
+            st.table(df_mes.sort_values("Fecha_Real", ascending=False)[["Fecha", "Cliente", "Plataforma", "Perfil_Pantalla", "Monto", "Tipo"]])
 
 # ==============================================================================
 # MÓDULO 5: SOPORTES
@@ -1347,6 +1431,9 @@ elif menu == "⚙️ Configuración":
             
             df_p = leer_tabla("precios", COLUMNAS_PRE)
             zip_file.writestr("precios.csv", df_p.to_csv(index=False))
+            
+            df_pg = leer_tabla("pagos", COLUMNAS_PAG)
+            zip_file.writestr("pagos.csv", df_pg.to_csv(index=False))
             
             if os.path.exists(ARCHIVO_PLANTILLAS):
                 zip_file.write(ARCHIVO_PLANTILLAS)

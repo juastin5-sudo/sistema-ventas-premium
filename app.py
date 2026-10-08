@@ -367,6 +367,62 @@ def matriz_de_servicio(df_inv, fila_cli):
         return plat, (df_inv.loc[i, "Correo"] if i is not None else None)
     return plat, fila_cli["Correo"]
 
+def pantallas_huerfanas(df_inv, df_cli):
+    """Pantallas que no salen para vender y que ningún cliente tiene."""
+    usados = set()
+    for _, r in df_cli.iterrows():
+        i = buscar_fila_inv(df_inv, r)
+        if i is not None:
+            usados.add(i)
+    filas, idxs = [], []
+    for i, r in df_inv.iterrows():
+        est = r["Estado"]
+        if est == "Ocupado" and i not in usados:
+            motivo = "Está Ocupada pero ningún cliente la tiene"
+        elif est not in ("Disponible", "Ocupado", "🔴 En Revisión"):
+            motivo = f"Estado raro: '{est}'"
+        else:
+            continue
+        filas.append({"Plataforma": r["Plataforma"], "Correo": r["Correo"], "Perfil_Pantalla": r["Perfil_Pantalla"], "Estado": est, "Motivo": motivo})
+        idxs.append(i)
+    return pd.DataFrame(filas, index=idxs) if filas else pd.DataFrame()
+
+def es_spotify_con_correo_cliente(fila_cli):
+    return fila_cli["Plataforma"] == "SPOTIFY" and str(fila_cli["Perfil_Pantalla"]) == str(fila_cli["Correo"])
+
+def reasignar_servicio(df_c, df_inv, idx_c, nuevo_i, correo_cli, ant_revision):
+    """Mueve un servicio de cliente a otra pantalla del inventario y libera la anterior."""
+    fila = df_c.loc[idx_c]
+    i_old = buscar_fila_inv(df_inv, fila)
+    spot_cli = es_spotify_con_correo_cliente(fila)
+    if i_old is not None:
+        df_inv.at[i_old, "Estado"] = "🔴 En Revisión" if ant_revision else "Disponible"
+        if spot_cli:
+            df_inv.at[i_old, "Perfil_Pantalla"] = "Cupo libre"
+    df_inv.at[nuevo_i, "Estado"] = "Ocupado"
+    if spot_cli:
+        corr = str(correo_cli).strip() or str(fila["Correo"])
+        df_inv.at[nuevo_i, "Perfil_Pantalla"] = corr
+        df_c.at[idx_c, "Correo"] = corr
+        df_c.at[idx_c, "Perfil_Pantalla"] = corr
+    else:
+        df_c.at[idx_c, "Correo"] = df_inv.at[nuevo_i, "Correo"]
+        df_c.at[idx_c, "Perfil_Pantalla"] = df_inv.at[nuevo_i, "Perfil_Pantalla"]
+    return df_c, df_inv
+
+def cambiar_correo_spotify(df_c, df_inv, idx_c, nuevo_correo):
+    """Cambia el correo del cliente de Spotify y el nombre de su cupo en el inventario."""
+    fila = df_c.loc[idx_c]
+    nuevo = str(nuevo_correo).strip()
+    if not es_spotify_con_correo_cliente(fila) or not nuevo or nuevo == str(fila["Correo"]):
+        return df_c, df_inv
+    i_old = buscar_fila_inv(df_inv, fila)
+    if i_old is not None:
+        df_inv.at[i_old, "Perfil_Pantalla"] = nuevo
+    df_c.at[idx_c, "Correo"] = nuevo
+    df_c.at[idx_c, "Perfil_Pantalla"] = nuevo
+    return df_c, df_inv
+
 def actualizar_fecha_pago(plataforma, correo, nueva_fecha):
     """Mueve la fecha de pago de la matriz y la de sus extras."""
     df = leer_tabla("inventario", COLUMNAS_INV)
@@ -997,6 +1053,8 @@ elif menu == "🛒 Vender Perfiles":
 # ==============================================================================
 elif menu == "🗃️ Base de Datos":
     st.header("🗃️ Gestor de Bases de Datos")
+    if "aviso_bd" in st.session_state:
+        st.success(st.session_state.pop("aviso_bd"))
     
     opcion_bd = st.radio("Selecciona la Base de Datos a visualizar:", ["👥 Base de Clientes Activos", "📦 Inventario Completo de Cuentas"], horizontal=True, label_visibility="collapsed", key="bd_radio")
     st.markdown("---")
@@ -1032,6 +1090,7 @@ elif menu == "🗃️ Base de Datos":
                     idx_real = filas_cli.index[filtro_busqueda].tolist()[0]
                     datos_fila = df_c.loc[idx_real]
                     
+                    df_inv_ed = leer_tabla("inventario", COLUMNAS_INV)
                     with st.form("form_edit_cli"):
                         c1, c2, c3 = st.columns(3)
                         n_tel = c1.text_input("Teléfono", value=str(datos_fila["Telefono"]))
@@ -1047,14 +1106,45 @@ elif menu == "🗃️ Base de Datos":
                         idx_estado = opciones_estado.index(datos_fila["Estado_Servicio"]) if datos_fila["Estado_Servicio"] in opciones_estado else 0
                         n_est = c3.selectbox("Estado del Servicio", opciones_estado, index=idx_estado)
                         
+                        st.markdown("**🔑 Datos de acceso y pantalla**")
+                        spot_cli_e = es_spotify_con_correo_cliente(datos_fila)
+                        if spot_cli_e:
+                            ea1, ea2 = st.columns(2)
+                            n_corr_cli = ea1.text_input("Correo del cliente (Spotify)", value=str(datos_fila["Correo"]))
+                            n_clave_cli = ea2.text_input("Contraseña del cliente (Spotify)", value=str(datos_fila["Clave_Spotify"]))
+                        else:
+                            n_corr_cli = str(datos_fila["Correo"])
+                            n_clave_cli = str(datos_fila["Clave_Spotify"])
+                            st.caption(f"Está en la pantalla: **{datos_fila['Correo']}** | Perfil: **{datos_fila['Perfil_Pantalla']}**. El correo y la clave de esa cuenta se cambian en Soportes > Actualizar Credenciales. Si lo registraste en la pantalla equivocada, muévelo aquí abajo.")
+                        n_monto = st.number_input("Monto del servicio ($)", min_value=0.0, step=0.5, value=float(to_float(datos_fila["Monto"])))
+                        disp_e = df_inv_ed[(df_inv_ed["Plataforma"] == datos_fila["Plataforma"]) & (df_inv_ed["Estado"] == "Disponible")]
+                        opc_reasig = {"(Dejarlo en su pantalla actual)": None}
+                        for i_d, r_d in disp_e.iterrows():
+                            opc_reasig[f"{r_d['Correo']} - {r_d['Perfil_Pantalla']}"] = i_d
+                        sel_reasig = st.selectbox("Mover a otra pantalla libre (si lo registraste en la equivocada)", list(opc_reasig.keys()))
+                        ant_revision = st.checkbox("Si lo muevo: la pantalla anterior queda 🔴 En Revisión (marca esto solo si el cliente sí la llegó a usar). Si no, vuelve a Disponible.", value=False)
+                        
                         liberar_pant = st.checkbox("Al eliminar, liberar su pantalla (queda 🔴 En Revisión para cambiar el PIN)", value=True)
                         col_btn1, col_btn2 = st.columns(2)
                         if col_btn1.form_submit_button("💾 Guardar Cambios", type="primary"):
                             df_c.at[idx_real, "Telefono"] = str(n_tel)
                             df_c.at[idx_real, "Fecha_Corte"] = str(n_f_corte)
                             df_c.at[idx_real, "Estado_Servicio"] = str(n_est)
+                            df_c.at[idx_real, "Monto"] = str(round(n_monto, 2))
+                            inv_cambio = False
+                            nuevo_i_sel = opc_reasig[sel_reasig]
+                            if nuevo_i_sel is not None:
+                                df_c, df_inv_ed = reasignar_servicio(df_c, df_inv_ed, idx_real, nuevo_i_sel, n_corr_cli if spot_cli_e else "", ant_revision)
+                                inv_cambio = True
+                            elif spot_cli_e:
+                                df_c, df_inv_ed = cambiar_correo_spotify(df_c, df_inv_ed, idx_real, n_corr_cli)
+                                inv_cambio = True
+                            if spot_cli_e:
+                                df_c.at[idx_real, "Clave_Spotify"] = str(n_clave_cli)
                             guardar_tabla("clientes", df_c, COLUMNAS_CLI)
-                            st.success("¡Cliente actualizado en la nube!")
+                            if inv_cambio:
+                                guardar_tabla("inventario", df_inv_ed, COLUMNAS_INV)
+                            st.session_state.aviso_bd = "¡Cliente actualizado en la nube!" + (" Cambié también su pantalla en el inventario." if nuevo_i_sel is not None else "")
                             st.rerun()
                             
                         if col_btn2.form_submit_button("🗑️ Eliminar Registro de la Nube"): 
@@ -1076,6 +1166,21 @@ elif menu == "🗃️ Base de Datos":
         df_i = leer_tabla("inventario", COLUMNAS_INV)
         
         if not df_i.empty:
+            df_c_orf = leer_tabla("clientes", COLUMNAS_CLI)
+            df_orf = pantallas_huerfanas(df_i, df_c_orf)
+            n_rev_i = int((df_i["Estado"] == "🔴 En Revisión").sum())
+            if not df_orf.empty:
+                st.warning(f"🔎 Encontré {len(df_orf)} pantalla(s) que no te salen para vender y que ningún cliente tiene:")
+                st.dataframe(df_orf, hide_index=True)
+                if st.button("🔓 Liberar estas pantallas (pasan a Disponible)", key="btn_liberar_orf", type="primary"):
+                    df_i.loc[df_orf.index, "Estado"] = "Disponible"
+                    guardar_tabla("inventario", df_i, COLUMNAS_INV)
+                    st.session_state.aviso_bd = f"¡Listo! {len(df_orf)} pantalla(s) volvieron a Disponible."
+                    st.rerun()
+            else:
+                st.success("✅ Todas las pantallas Ocupadas tienen un cliente asignado.")
+            if n_rev_i:
+                st.caption(f"Además hay {n_rev_i} pantalla(s) en 🔴 En Revisión: no salen para vender hasta que las reactives en el Panel Diario.")
             busq_inv = st.text_input("🔍 Buscar (plataforma, correo, perfil, región, estado...)", key="busq_inv", placeholder="Escribe y la lista se filtra")
             if busq_inv.strip():
                 _ti = busq_inv.strip().lower()

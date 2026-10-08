@@ -1258,8 +1258,15 @@ elif menu == "💰 Finanzas":
             c_base = to_float(r_m["Costo_Matriz"])
             c_tot, c_ext, n_ext = costo_con_extras(df_inv, plat_m, corr_m, c_base)
             ing_m = ing_cuenta.get((plat_m, corr_m), 0.0)
+            _fp = pd.to_datetime(r_m["Fecha_Pago"], errors="coerce")
+            if pd.isna(_fp):
+                f_pago_m, txt_vence = pd.NaT, "Sin fecha"
+            else:
+                f_pago_m = _fp.normalize()
+                d_pago = (f_pago_m.date() - date.today()).days
+                txt_vence = f"Vencida hace {abs(d_pago)} d" if d_pago < 0 else ("Hoy" if d_pago == 0 else f"En {d_pago} d")
             filas_cta.append({
-                "Plataforma": plat_m, "Correo": corr_m, "Región": r_m["IP_Region"],
+                "Plataforma": plat_m, "Correo": corr_m, "Región": r_m["IP_Region"], "Fecha de pago": f_pago_m, "Vence": txt_vence,
                 "Costo cuenta ($)": float(c_base), "Extras": int(n_ext), "Costo extras ($)": float(c_ext),
                 "Costo total ($)": round(c_tot, 2), "Vendidos": f"{int((perf_m['Estado'] == 'Ocupado').sum())}/{len(perf_m)}",
                 "Ingreso mensual ($)": round(ing_m, 2), "Ganancia mensual ($)": round(ing_m - c_tot, 2)
@@ -1267,31 +1274,50 @@ elif menu == "💰 Finanzas":
 
     if filas_cta:
         df_cuentas = pd.DataFrame(filas_cta)
-        df_ed = st.data_editor(
-            df_cuentas, key="ed_cuentas", hide_index=True,
-            disabled=[c for c in df_cuentas.columns if c not in ("Región", "Costo cuenta ($)")],
-            column_config={
-                "Región": st.column_config.TextColumn("Región (editable)"),
-                "Costo cuenta ($)": st.column_config.NumberColumn("Costo cuenta ($) (editable)", min_value=0.0, step=0.5, format="%.2f"),
-            }
-        )
+        df_cuentas["Fecha de pago"] = pd.to_datetime(df_cuentas["Fecha de pago"], errors="coerce")
+        ediciones = []
+        for plat_x in df_cuentas["Plataforma"].unique().tolist():
+            sub_o = df_cuentas[df_cuentas["Plataforma"] == plat_x].reset_index(drop=True)
+            ing_x = float(sub_o["Ingreso mensual ($)"].sum())
+            cos_x = float(sub_o["Costo total ($)"].sum())
+            titulo_x = f"📺 {plat_x}  ·  {len(sub_o)} cuenta(s)  ·  Ingreso ${ing_x:,.2f}  ·  Costo ${cos_x:,.2f}  ·  Ganancia ${ing_x - cos_x:,.2f}"
+            with st.expander(titulo_x, expanded=False):
+                sub_n = st.data_editor(
+                    sub_o, key=f"ed_cuentas_{plat_x}", hide_index=True,
+                    disabled=[c for c in sub_o.columns if c not in ("Región", "Fecha de pago", "Costo cuenta ($)")],
+                    column_config={
+                        "Plataforma": None,
+                        "Región": st.column_config.TextColumn("Región (editable)"),
+                        "Fecha de pago": st.column_config.DateColumn("Fecha de pago (editable)", format="DD/MM/YYYY"),
+                        "Costo cuenta ($)": st.column_config.NumberColumn("Costo cuenta ($) (editable)", min_value=0.0, step=0.5, format="%.2f"),
+                    }
+                )
+            ediciones.append((sub_o, sub_n))
+
         if st.button("💾 Guardar cambios de cuentas", type="primary", key="btn_guardar_cuentas"):
             df_inv_g = df_inv.copy()
             hubo = False
             region_mala = False
-            for pos in range(len(df_cuentas)):
-                orig = df_cuentas.iloc[pos]
-                nuevo = df_ed.iloc[pos]
-                n_costo = to_float(nuevo["Costo cuenta ($)"])
-                n_reg = "" if pd.isna(nuevo["Región"]) else str(nuevo["Región"]).strip()
-                if n_reg.upper().startswith("EXTRA"):
-                    region_mala = True
-                    continue
-                if abs(n_costo - float(orig["Costo cuenta ($)"])) > 1e-9 or n_reg != str(orig["Región"]):
+            for sub_o, sub_n in ediciones:
+                for pos in range(len(sub_o)):
+                    orig = sub_o.iloc[pos]
+                    nuevo = sub_n.iloc[pos]
+                    n_costo = to_float(nuevo["Costo cuenta ($)"])
+                    n_reg = "" if pd.isna(nuevo["Región"]) else str(nuevo["Región"]).strip()
+                    if n_reg.upper().startswith("EXTRA"):
+                        region_mala = True
+                        continue
                     m_g = (df_inv_g["Plataforma"] == orig["Plataforma"]) & (df_inv_g["Correo"] == orig["Correo"])
-                    df_inv_g.loc[m_g, "Costo_Matriz"] = str(n_costo)
-                    df_inv_g.loc[m_g, "IP_Region"] = n_reg
-                    hubo = True
+                    m_ext_g = (df_inv_g["Plataforma"] == orig["Plataforma"]) & (df_inv_g["IP_Region"] == f"EXTRA de {orig['Correo']}")
+                    if abs(n_costo - float(orig["Costo cuenta ($)"])) > 1e-9 or n_reg != str(orig["Región"]):
+                        df_inv_g.loc[m_g, "Costo_Matriz"] = str(n_costo)
+                        df_inv_g.loc[m_g, "IP_Region"] = n_reg
+                        hubo = True
+                    n_fecha = pd.to_datetime(nuevo["Fecha de pago"], errors="coerce")
+                    o_fecha = pd.to_datetime(orig["Fecha de pago"], errors="coerce")
+                    if (not pd.isna(n_fecha)) and (pd.isna(o_fecha) or n_fecha.date() != o_fecha.date()):
+                        df_inv_g.loc[m_g | m_ext_g, "Fecha_Pago"] = str(n_fecha.date())
+                        hubo = True
             if region_mala:
                 st.error("⚠️ La región no puede empezar con la palabra EXTRA (esa palabra se usa para los perfiles extra).")
             elif hubo:

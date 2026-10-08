@@ -401,6 +401,15 @@ def cargar_plantilla(tipo):
     except:
         return ""
 
+def armar_mensaje_datos(plataforma, correo, clave, perfil, pin, fecha_corte):
+    """Mensaje con los datos de acceso, usando tu plantilla de Venta."""
+    try:
+        fc = pd.to_datetime(fecha_corte).strftime('%d/%m/%Y')
+    except:
+        fc = str(fecha_corte)
+    cuerpo = cargar_plantilla("venta").replace("[plataforma]", str(plataforma)).replace("[correo]", str(correo)).replace("[clave]", str(clave)).replace("[perfil]", str(perfil)).replace("[pin]", str(pin)).replace("[fecha_corte]", fc)
+    return "¡Hola! Aquí tienes tus datos de acceso actualizados:\n\n" + cuerpo
+
 inicializar_archivos()
 
 # ==============================================================================
@@ -1211,14 +1220,114 @@ elif menu == "🛠️ Soportes":
     
     opcion_soporte = st.radio(
         "Selecciona la herramienta a utilizar:", 
-        ["🔄 1. Cambio Rápido Individual", "🚨 2. Crisis / Caída Masiva", "🔑 3. Actualizar Credenciales Matrices"],
+        ["🩺 Atender Reporte", "🔄 Cambio Rápido Individual", "🚨 Crisis / Caída Masiva", "🔑 Actualizar Credenciales Matrices"],
         horizontal=True,
         label_visibility="collapsed",
         key="sop_radio"
     )
     st.markdown("---")
     
-    if opcion_soporte == "🔄 1. Cambio Rápido Individual":
+    if opcion_soporte == "🩺 Atender Reporte":
+        st.info("🩺 Un cliente te reporta un problema: elige el cliente, el servicio y el tipo de falla, y te muestro qué hacer.")
+        if "m_reporte" in st.session_state:
+            st.success(st.session_state.pop("m_reporte_titulo", "¡Listo!"))
+            st.code(st.session_state.m_reporte, language="markdown")
+            del st.session_state.m_reporte
+
+        df_cli_rep = leer_tabla("clientes", COLUMNAS_CLI)
+        df_inv_rep = leer_tabla("inventario", COLUMNAS_INV)
+
+        if df_cli_rep.empty:
+            st.info("Todavía no hay clientes registrados.")
+        else:
+            cli_rep = st.selectbox("1. 👤 ¿Qué cliente reporta?", ["--- Seleccione ---"] + sorted(df_cli_rep["Cliente"].unique().tolist()), key="rep_cli")
+
+            if cli_rep != "--- Seleccione ---":
+                df_f_rep = df_cli_rep[(df_cli_rep["Cliente"] == cli_rep) & (df_cli_rep["Estado_Servicio"] != "Pendiente")]
+                opc_rep = [""] + [f"{r['Plataforma']} | 📧 {r['Correo']} | Perfil: {r['Perfil_Pantalla']} (ID:{idx})" for idx, r in df_f_rep.iterrows()]
+                serv_rep = st.selectbox("2. 📺 ¿Qué servicio tiene el problema?", opc_rep, key="rep_serv")
+
+                if serv_rep:
+                    idx_rep = int(serv_rep.split("(ID:")[1].replace(")", ""))
+                    d_rep = df_cli_rep.loc[idx_rep]
+                    tipos_rep = ["--- Seleccione ---", "🔢 El PIN no coincide", "🔑 El correo o la clave no funcionan", "💳 La cuenta sale sin pago / suspendida", "📺 La pantalla falla o no abre"]
+                    tipo_rep = st.selectbox("3. ❓ ¿Qué problema tiene?", tipos_rep, key="rep_tipo")
+
+                    m_inv_rep = df_inv_rep[(df_inv_rep["Plataforma"] == d_rep["Plataforma"]) & (df_inv_rep["Correo"] == d_rep["Correo"]) & (df_inv_rep["Perfil_Pantalla"] == d_rep["Perfil_Pantalla"])]
+                    st.markdown("---")
+
+                    if tipo_rep == "📺 La pantalla falla o no abre":
+                        st.info("Para este caso usa **🔄 Cambio Rápido Individual**: le asigna una pantalla nueva y deja la vieja en revisión. Si le pasa a varios clientes de la misma cuenta, usa **🚨 Crisis / Caída Masiva**.")
+
+                    elif tipo_rep != "--- Seleccione ---" and m_inv_rep.empty:
+                        st.warning("No encontré esta pantalla en el inventario (puede ser un Spotify con correo del cliente, o el perfil cambió de nombre). Revísala en **Base de Datos > Inventario Completo**.")
+
+                    elif tipo_rep == "🔢 El PIN no coincide":
+                        i_inv = m_inv_rep.index[0]
+                        d_inv = df_inv_rep.loc[i_inv]
+                        st.markdown("**PIN guardado en tu sistema:**")
+                        st.code(str(d_inv["PIN"]), language="markdown")
+                        nuevo_pin = st.text_input("PIN correcto (cámbialo solo si lo cambiaste en la plataforma)", value=str(d_inv["PIN"]), key=f"rep_pin_{idx_rep}")
+                        if st.button("💾 Guardar PIN y generar mensaje", type="primary", key=f"btn_rep_pin_{idx_rep}"):
+                            if nuevo_pin.strip() == "":
+                                st.error("⚠️ El PIN no puede estar vacío.")
+                            else:
+                                if nuevo_pin.strip() != str(d_inv["PIN"]):
+                                    df_inv_rep.at[i_inv, "PIN"] = nuevo_pin.strip()
+                                    guardar_tabla("inventario", df_inv_rep, COLUMNAS_INV)
+                                st.session_state.m_reporte = armar_mensaje_datos(d_inv["Plataforma"], d_inv["Correo"], d_inv["Clave"], d_inv["Perfil_Pantalla"], nuevo_pin.strip(), d_rep["Fecha_Corte"])
+                                st.session_state.m_reporte_titulo = "¡PIN al día! Mensaje listo para enviar:"
+                                st.rerun()
+
+                    elif tipo_rep == "🔑 El correo o la clave no funcionan":
+                        i_inv = m_inv_rep.index[0]
+                        d_inv = df_inv_rep.loc[i_inv]
+                        st.markdown("**Datos guardados en tu sistema:**")
+                        st.code(str(d_inv["Correo"]), language="markdown")
+                        st.code(str(d_inv["Clave"]), language="markdown")
+                        nueva_clave_rep = st.text_input("Clave correcta (cámbiala solo si cambió en la plataforma)", value=str(d_inv["Clave"]), key=f"rep_clave_{idx_rep}")
+                        st.caption("Si lo que cambió fue el correo de la cuenta, usa **🔑 Actualizar Credenciales Matrices**.")
+                        if st.button("💾 Guardar clave y generar mensaje", type="primary", key=f"btn_rep_clave_{idx_rep}"):
+                            if nueva_clave_rep.strip() == "":
+                                st.error("⚠️ La clave no puede estar vacía.")
+                            else:
+                                if nueva_clave_rep.strip() != str(d_inv["Clave"]):
+                                    mask_cl = (df_inv_rep["Plataforma"] == d_inv["Plataforma"]) & (df_inv_rep["Correo"] == d_inv["Correo"])
+                                    df_inv_rep.loc[mask_cl, "Clave"] = nueva_clave_rep.strip()
+                                    guardar_tabla("inventario", df_inv_rep, COLUMNAS_INV)
+                                st.session_state.m_reporte = armar_mensaje_datos(d_inv["Plataforma"], d_inv["Correo"], nueva_clave_rep.strip(), d_inv["Perfil_Pantalla"], d_inv["PIN"], d_rep["Fecha_Corte"])
+                                st.session_state.m_reporte_titulo = "¡Datos al día! Mensaje listo para enviar:"
+                                st.rerun()
+
+                    elif tipo_rep == "💳 La cuenta sale sin pago / suspendida":
+                        d_inv = df_inv_rep.loc[m_inv_rep.index[0]]
+                        ip_txt = str(d_inv["IP_Region"])
+                        corr_pago = ip_txt[len("EXTRA de "):] if ip_txt.startswith("EXTRA de ") else d_inv["Correo"]
+                        plat_pago = d_inv["Plataforma"]
+                        mat_pago = df_inv_rep[(df_inv_rep["Plataforma"] == plat_pago) & (df_inv_rep["Correo"] == corr_pago)]
+                        if mat_pago.empty:
+                            st.warning("No encontré la cuenta matriz que paga este servicio. Revisa el inventario.")
+                        else:
+                            fila_mat = mat_pago.iloc[0]
+                            tot_pago, c_ext_pago, n_ext_pago = costo_con_extras(df_inv_rep, plat_pago, corr_pago, fila_mat["Costo_Matriz"])
+                            n_cli_pago = df_cli_rep[(df_cli_rep["Plataforma"] == plat_pago) & (df_cli_rep["Correo"] == corr_pago)]["Cliente"].nunique()
+                            st.markdown(f"**Cuenta que lo paga:** {plat_pago} | `{corr_pago}`")
+                            st.markdown(f"**Próximo pago registrado:** {fila_mat['Fecha_Pago']} | **A pagar:** ${tot_pago:.2f} | **Clientes en esa cuenta:** {n_cli_pago}")
+                            fp_pago = pd.to_datetime(fila_mat["Fecha_Pago"], errors="coerce")
+                            if pd.isna(fp_pago) or fp_pago.date() > date.today():
+                                st.warning("En tu sistema esta cuenta todavía no vence. Si en la plataforma sale sin pago, márcala como **por pagar hoy** para que aparezca en el aviso del Panel Diario.")
+                                if st.button("🚨 Marcar como POR PAGAR HOY", type="primary", key=f"btn_rep_pago_{idx_rep}"):
+                                    actualizar_fecha_pago(plat_pago, corr_pago, date.today())
+                                    st.session_state.m_reporte = "¡Hola! Ya estamos reactivando tu cuenta, te aviso apenas quede lista 🙏"
+                                    st.session_state.m_reporte_titulo = "Cuenta marcada como por pagar. Mensaje para el cliente:"
+                                    st.rerun()
+                            else:
+                                st.success("Esta cuenta ya está vencida o vence hoy, así que aparece en el aviso del Panel Diario. Págala y pulsa **Ya pagué** ahí.")
+                                st.code("¡Hola! Ya estamos reactivando tu cuenta, te aviso apenas quede lista 🙏", language="markdown")
+                            if n_cli_pago > 1:
+                                st.caption("Hay varios clientes en esta cuenta. Si todos reportan lo mismo, usa **🚨 Crisis / Caída Masiva**.")
+
+    elif opcion_soporte == "🔄 Cambio Rápido Individual":
         if "m_swap" in st.session_state:
             st.success("¡Cambio realizado!")
             st.code(st.session_state.m_swap, language="markdown")
@@ -1274,7 +1383,7 @@ elif menu == "🛠️ Soportes":
                             st.session_state.m_swap = cargar_plantilla("soporte").replace("[plataforma]", plat_af).replace("[correo]", d_n['Correo']).replace("[clave]", d_n['Clave']).replace("[perfil]", d_n['Perfil_Pantalla']).replace("[pin]", d_n['PIN']).replace("[fecha_corte]", fc_obj)
                             st.rerun()
 
-    elif opcion_soporte == "🚨 2. Crisis / Caída Masiva":
+    elif opcion_soporte == "🚨 Crisis / Caída Masiva":
         st.info("💥 **Modo Pánico:** Pausa a todos los clientes de una cuenta específica de forma masiva.")
         df_cli_mas = leer_tabla("clientes", COLUMNAS_CLI)
         df_inv_mas = leer_tabla("inventario", COLUMNAS_INV)
@@ -1347,7 +1456,7 @@ elif menu == "🛠️ Soportes":
             else:
                 st.write("Sin cuentas congeladas actualmente.")
 
-    elif opcion_soporte == "🔑 3. Actualizar Credenciales Matrices":
+    elif opcion_soporte == "🔑 Actualizar Credenciales Matrices":
         st.info("🔑 Actualiza el correo, contraseña o el costo de inversión de la cuenta.")
         df_inv_cred = leer_tabla("inventario", COLUMNAS_INV)
         df_cli_cred = leer_tabla("clientes", COLUMNAS_CLI)

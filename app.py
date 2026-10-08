@@ -1496,13 +1496,40 @@ elif menu == "🛠️ Soportes":
                 if serv_rep:
                     idx_rep = int(serv_rep.split("(ID:")[1].replace(")", ""))
                     d_rep = df_cli_rep.loc[idx_rep]
-                    tipos_rep = ["--- Seleccione ---", "🔢 El PIN no coincide", "🔑 El correo o la clave no funcionan", "💳 La cuenta sale sin pago / suspendida", "📺 La pantalla falla o no abre"]
+                    tipos_rep = ["--- Seleccione ---", "🔢 El PIN no coincide", "🔑 El correo o la clave no funcionan", "💳 La cuenta sale sin pago / suspendida", "📺 La pantalla falla o no abre", "⏳ Caída / tardé en responder (agregar días)"]
                     tipo_rep = st.selectbox("3. ❓ ¿Qué problema tiene?", tipos_rep, key="rep_tipo")
 
                     m_inv_rep = df_inv_rep[(df_inv_rep["Plataforma"] == d_rep["Plataforma"]) & (df_inv_rep["Correo"] == d_rep["Correo"]) & (df_inv_rep["Perfil_Pantalla"] == d_rep["Perfil_Pantalla"])]
                     st.markdown("---")
 
-                    if tipo_rep == "📺 La pantalla falla o no abre":
+                    if tipo_rep == "⏳ Caída / tardé en responder (agregar días)":
+                        try:
+                            fc_rep = pd.to_datetime(d_rep["Fecha_Corte"]).date()
+                        except:
+                            fc_rep = None
+                        if fc_rep is None:
+                            st.error("Este servicio no tiene una fecha de corte válida. Corrígela en Base de Datos.")
+                        else:
+                            st.markdown(f"**Fecha de corte actual:** {fc_rep.strftime('%d/%m/%Y')}")
+                            dias_perd = st.number_input("📅 Días perdidos a agregar (1 a 31)", min_value=1, max_value=31, value=1, step=1, key=f"rep_dias_{idx_rep}")
+                            todos_serv = st.checkbox("Aplicar a todos los servicios de este cliente", value=False, key=f"rep_todos_{idx_rep}")
+                            st.markdown(f"**Nueva fecha de corte:** {(fc_rep + timedelta(days=int(dias_perd))).strftime('%d/%m/%Y')}")
+                            if st.button("➕ Agregar días y generar mensaje", type="primary", key=f"btn_rep_dias_{idx_rep}"):
+                                filas_dias = df_f_rep.index.tolist() if todos_serv else [idx_rep]
+                                for i_d in filas_dias:
+                                    try:
+                                        f_v = pd.to_datetime(df_cli_rep.at[i_d, "Fecha_Corte"]).date()
+                                    except:
+                                        continue
+                                    df_cli_rep.at[i_d, "Fecha_Corte"] = str(f_v + timedelta(days=int(dias_perd)))
+                                guardar_tabla("clientes", df_cli_rep, COLUMNAS_CLI)
+                                nueva_fc = (fc_rep + timedelta(days=int(dias_perd))).strftime('%d/%m/%Y')
+                                cuenta_serv = "tus servicios" if todos_serv else f"tu servicio de {d_rep['Plataforma']}"
+                                st.session_state.m_reporte = f"¡Hola! Disculpa la demora y el inconveniente 🙏 Te agregué {int(dias_perd)} día(s) a {cuenta_serv} por el tiempo perdido. Tu nueva fecha de corte es el {nueva_fc}."
+                                st.session_state.m_reporte_titulo = f"¡Listo! Se agregaron {int(dias_perd)} día(s). Mensaje para el cliente:"
+                                st.rerun()
+
+                    elif tipo_rep == "📺 La pantalla falla o no abre":
                         st.info("Para este caso usa **🔄 Cambio Rápido Individual**: le asigna una pantalla nueva y deja la vieja en revisión. Si le pasa a varios clientes de la misma cuenta, usa **🚨 Crisis / Caída Masiva**.")
 
                     elif tipo_rep != "--- Seleccione ---" and m_inv_rep.empty:

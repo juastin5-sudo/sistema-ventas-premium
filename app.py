@@ -888,6 +888,10 @@ elif menu == "🛒 Vender Perfiles":
                 st.info("⏱️ **Control de Tiempos:**")
                 act_ya = st.checkbox("✅ ¿Servicio activado y entregado al instante?", value=True, key=f"frm_act_{cart_len}")
                 
+                usar_fecha_manual = st.checkbox("📅 Cliente que ya tenía el servicio: poner la fecha de corte a mano", value=False, key=f"frm_usar_fecha_{cart_len}")
+                fecha_corte_manual = st.date_input("Fecha de corte (solo se usa si marcaste la casilla de arriba)", value=date.today(), key=f"frm_fecha_corte_{cart_len}")
+                st.caption("Si marcas la casilla, la fecha de inicio se calcula hacia atrás según los meses contratados, y el pago queda anotado en esa fecha (no en el mes de hoy).")
+                
                 cb1, cb2 = st.columns(2)
                 b_conf = cb1.form_submit_button("🚀 Confirmar Venta", type="primary")
                 b_cot = cb2.form_submit_button("📋 Solo Cotizar Cuenta", type="secondary")
@@ -912,20 +916,27 @@ elif menu == "🛒 Vender Perfiles":
                         f_base = date.today()
                         
                         for i in st.session_state.carrito:
-                            f_c = sumar_meses(f_base, i["Meses"])
+                            if usar_fecha_manual and act_ya:
+                                f_c = fecha_corte_manual
+                                f_ini = sumar_meses(fecha_corte_manual, -int(i["Meses"]))
+                                tipo_pago = "Importado"
+                            else:
+                                f_c = sumar_meses(f_base, i["Meses"])
+                                f_ini = f_base
+                                tipo_pago = "Venta"
                             f_nuevas.append({
                                 "Cliente": cli, "Telefono": tel, "Plataforma": i["Plataforma"], 
                                 "Correo": i["Correo_Matriz"] if not i["Correo_Cliente"] else i["Correo_Cliente"], 
-                                "Perfil_Pantalla": i["Perfil_Pantalla"], "Fecha_Inicio": str(f_base), "Fecha_Corte": str(f_c), 
+                                "Perfil_Pantalla": i["Perfil_Pantalla"], "Fecha_Inicio": str(f_ini), "Fecha_Corte": str(f_c), 
                                 "Metodo_Pago": met, "Monto": str(m_div), "Clave_Spotify": i["Clave_Cliente"], 
                                 "Estado_Servicio": e_ini, "Fecha_Congelamiento": "", "Meses_Contratados": str(i["Meses"])
                             })
                             
                             p_nuevos.append({
-                                "Fecha": str(f_base), "Cliente": cli, "Plataforma": i["Plataforma"],
+                                "Fecha": str(f_ini), "Cliente": cli, "Plataforma": i["Plataforma"],
                                 "Correo": i["Correo_Matriz"] if not i["Correo_Cliente"] else i["Correo_Cliente"],
                                 "Perfil_Pantalla": i["Perfil_Pantalla"], "Monto": str(m_div),
-                                "Metodo_Pago": met, "Meses": str(i["Meses"]), "Tipo": "Venta"
+                                "Metodo_Pago": met, "Meses": str(i["Meses"]), "Tipo": tipo_pago
                             })
                             
                             idx = i["index_original"]
@@ -1058,6 +1069,48 @@ elif menu == "🗃️ Base de Datos":
                         df_i = df_i.drop(idx_real_i)
                         guardar_tabla("inventario", df_i, COLUMNAS_INV)
                         st.warning("¡Registro borrado para siempre!")
+                        st.rerun()
+
+            st.markdown("---")
+            st.subheader("🗑️ Eliminar una cuenta completa")
+            st.caption("Borra la cuenta con todos sus perfiles de una sola vez. Antes de hacerlo, descarga una copia de seguridad en Configuración.")
+            mats_del = df_i[~df_i["IP_Region"].str.startswith("EXTRA")].drop_duplicates(subset=["Plataforma", "Correo"])
+            opc_del = mats_del.apply(lambda r: f"{r['Plataforma']} | {r['Correo']}", axis=1).tolist()
+            cta_del = st.selectbox("Selecciona la cuenta matriz a eliminar:", ["--- Seleccione ---"] + opc_del, key="del_cta_sel")
+
+            if cta_del != "--- Seleccione ---":
+                plat_del, corr_del = cta_del.split(" | ", 1)
+                n_perf_del = len(df_i[(df_i["Plataforma"] == plat_del) & (df_i["Correo"] == corr_del)])
+                extras_del = df_i[(df_i["Plataforma"] == plat_del) & (df_i["IP_Region"] == f"EXTRA de {corr_del}")]
+                df_c_del = leer_tabla("clientes", COLUMNAS_CLI)
+                cli_del = df_c_del[(df_c_del["Plataforma"] == plat_del) & (df_c_del["Correo"] == corr_del)]
+                st.info(f"Esta cuenta tiene **{n_perf_del} perfiles**, **{len(extras_del)} perfil(es) extra** vinculados y **{cli_del['Cliente'].nunique()} cliente(s)** ({len(cli_del)} servicios).")
+
+                accion_cli = st.radio("¿Qué hacemos con los clientes de esta cuenta?", ["Conservar a los clientes (solo se borra la cuenta)", "Eliminar también a sus clientes"], key="del_cta_cli")
+                if plat_del == "SPOTIFY":
+                    st.caption("En Spotify los clientes se registran con su propio correo, así que no se eliminan automáticamente. Búscalos en la base de clientes.")
+
+                borrar_extras = False
+                if len(extras_del) > 0:
+                    borrar_extras = st.checkbox(f"Eliminar también sus {len(extras_del)} perfil(es) extra (si no, quedan como cuentas independientes)", value=True, key="del_cta_ext")
+
+                conf_del = st.checkbox("Entiendo que esto no se puede deshacer", key="del_cta_conf")
+                if st.button("🗑️ Eliminar cuenta completa", type="primary", key="btn_del_cta"):
+                    if not conf_del:
+                        st.error("⚠️ Marca la casilla de confirmación.")
+                    else:
+                        mask_cta = (df_i["Plataforma"] == plat_del) & (df_i["Correo"] == corr_del)
+                        mask_ext = (df_i["Plataforma"] == plat_del) & (df_i["IP_Region"] == f"EXTRA de {corr_del}")
+                        a_borrar = (mask_cta | mask_ext) if borrar_extras else mask_cta
+                        if not borrar_extras:
+                            df_i.loc[mask_ext, "IP_Region"] = "Independiente"
+                        guardar_tabla("inventario", df_i[~a_borrar], COLUMNAS_INV)
+
+                        if "Eliminar también" in accion_cli:
+                            correos_cli = [corr_del] + (extras_del["Correo"].unique().tolist() if borrar_extras else [])
+                            mask_cl = (df_c_del["Plataforma"] == plat_del) & (df_c_del["Correo"].isin(correos_cli))
+                            guardar_tabla("clientes", df_c_del[~mask_cl], COLUMNAS_CLI)
+                        st.success("¡Cuenta eliminada!")
                         st.rerun()
         else:
             st.info("El Inventario está completamente vacío.")

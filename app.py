@@ -303,6 +303,110 @@ def agregar_filas(tabla, df, columnas):
     st.cache_data.clear()
     return True
 
+def _texto_excel(v):
+    if pd.isna(v):
+        return ""
+    if isinstance(v, (datetime, date, pd.Timestamp)):
+        return pd.to_datetime(v).strftime("%Y-%m-%d")
+    texto = str(v).strip()
+    return "" if texto.lower() in {"nan", "nat", "none"} else texto
+
+def _fecha_excel(v):
+    texto = _texto_excel(v)
+    if not texto:
+        return ""
+    try:
+        return pd.to_datetime(v, errors="raise").strftime("%Y-%m-%d")
+    except Exception:
+        return ""
+
+def preparar_importacion_excel(archivo):
+    """Convierte las hojas del libro histórico a inventario/clientes sin escribir en Supabase."""
+    mapas = {
+        "NETFLIX":     {"email": 6, "clave": 7, "slot": 8, "pin": 9, "cliente": 11, "inicio": 12, "corte": 14},
+        "NETFLIX PE":  {"email": 6, "clave": 7, "slot": 8, "pin": 9, "cliente": 11, "inicio": 12, "corte": 14},
+        "SPOTIFY":     {"email": 7, "clave": 8, "slot": 9, "pin": None, "cliente": 11, "inicio": 12, "corte": 14},
+        "DISNEY":      {"email": 5, "clave": 6, "slot": 7, "pin": 8, "cliente": 10, "inicio": 11, "corte": 13},
+        "HBO MAX":     {"email": 5, "clave": 6, "slot": 7, "pin": 8, "cliente": 11, "inicio": 12, "corte": 14},
+        "AMAZON":      {"email": 6, "clave": 7, "slot": 8, "pin": 9, "cliente": 11, "inicio": 12, "corte": 14},
+        "CRUNCHY":     {"email": 6, "clave": 7, "slot": 8, "pin": None, "cliente": 10, "inicio": 11, "corte": None},
+        "PARAMOUNT +": {"email": 6, "clave": 7, "slot": 8, "pin": None, "cliente": 10, "inicio": 11, "corte": None},
+    }
+    inventario, clientes, avisos = [], [], []
+    libro = pd.ExcelFile(archivo)
+    for hoja in libro.sheet_names:
+        nombre_hoja = str(hoja).strip().upper()
+        mapa = mapas.get(nombre_hoja)
+        if not mapa:
+            avisos.append(f"Hoja no reconocida: {hoja}")
+            continue
+        df = pd.read_excel(archivo, sheet_name=hoja, header=None, dtype=object)
+        if df.shape[0] <= 4:
+            continue
+        # La fila 4 del Excel contiene encabezados; los registros empiezan en la fila 5.
+        correo_actual, clave_actual = "", ""
+        cuenta_slots = {}
+        for pos in range(4, len(df)):
+            fila = df.iloc[pos]
+            def celda(indice):
+                return _texto_excel(fila.iloc[indice]) if indice is not None and indice < len(fila) else ""
+            correo_fila = celda(mapa["email"])
+            clave_fila = celda(mapa["clave"])
+            # Solo actualizamos el contexto de matriz con credenciales explícitas de la fila.
+            if correo_fila:
+                correo_actual = correo_fila
+            if clave_fila:
+                clave_actual = clave_fila
+            correo = correo_actual
+            clave = clave_actual
+            if not correo:
+                continue
+            # Saltar líneas de totales/resúmenes y filas sin ningún dato de perfil.
+            cliente = celda(mapa["cliente"])
+            fecha_inicio = _fecha_excel(fila.iloc[mapa["inicio"]]) if mapa["inicio"] is not None and mapa["inicio"] < len(fila) else ""
+            fecha_corte = _fecha_excel(fila.iloc[mapa["corte"]]) if mapa["corte"] is not None and mapa["corte"] < len(fila) else ""
+            valor_slot = celda(mapa["slot"])
+            pin = celda(mapa["pin"]) if mapa["pin"] is not None else "N/A"
+            if cliente.upper() in {"TOTAL", "TOTALES"}:
+                continue
+            if not any([cliente, fecha_inicio, fecha_corte, valor_slot, pin]):
+                continue
+            key_cuenta = (nombre_hoja, correo.casefold())
+            if key_cuenta not in cuenta_slots:
+                cuenta_slots[key_cuenta] = 0
+            # Cada fila con datos de pantalla representa un cupo; el nombre del perfil es estable.
+            if nombre_hoja == "SPOTIFY":
+                # En esta app cada cupo de Spotify se identifica por el correo propio del cliente.
+                slot_label = correo
+            elif valor_slot:
+                slot_label = valor_slot if valor_slot.lower().startswith(("perfil", "cupo", "principal")) else f"Perfil {valor_slot}"
+            else:
+                cuenta_slots[key_cuenta] += 1
+                slot_label = f"Perfil {cuenta_slots[key_cuenta]}"
+            inventario.append({
+                "Plataforma": "NETFLIX" if nombre_hoja == "NETFLIX PE" else nombre_hoja,
+                "Correo": correo, "Clave": clave, "Perfil_Pantalla": slot_label,
+                "PIN": pin, "Estado": "Ocupado" if cliente else "Disponible", "Fecha_Pago": "",
+                "IP_Region": "", "Costo_Matriz": "0"
+            })
+            if cliente:
+                clientes.append({
+                    "Cliente": cliente, "Telefono": "",
+                    "Plataforma": "NETFLIX" if nombre_hoja == "NETFLIX PE" else nombre_hoja,
+                    "Correo": correo, "Perfil_Pantalla": slot_label,
+                    "Fecha_Inicio": fecha_inicio, "Fecha_Corte": fecha_corte,
+                    "Metodo_Pago": "", "Monto": "0", "Clave_Spotify": clave if nombre_hoja == "SPOTIFY" else "",
+                    "Estado_Servicio": "Pendiente" if not fecha_corte else ("Activo" if pd.to_datetime(fecha_corte).date() >= date.today() else "Pendiente"),
+                    "Fecha_Congelamiento": "", "Meses_Contratados": "1"
+                })
+    df_inv = pd.DataFrame(inventario, columns=COLUMNAS_INV).fillna("").astype(str)
+    df_cli = pd.DataFrame(clientes, columns=COLUMNAS_CLI).fillna("").astype(str)
+    if not df_inv.empty:
+        df_inv = df_inv.drop_duplicates(subset=["Plataforma", "Correo", "Perfil_Pantalla"])
+    if not df_cli.empty:
+        df_cli = df_cli.drop_duplicates(subset=["Plataforma", "Correo", "Cliente", "Fecha_Inicio", "Fecha_Corte"])
+    return df_inv, df_cli, avisos
+
 def obtener_tasa_binance():
     url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
     headers = {"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"}
@@ -496,7 +600,7 @@ st.sidebar.markdown("""
 
 menu = st.sidebar.radio(
     "Menú Principal", 
-    ["📌 Panel Diario", "📦 Registrar Cuentas", "🛒 Vender Perfiles", "🗃️ Base de Datos", "💰 Finanzas", "🛠️ Soportes", "⚙️ Configuración"],
+    ["📌 Panel Diario", "📦 Registrar Cuentas", "🛒 Vender Perfiles", "📥 Importar Excel", "🗃️ Base de Datos", "💰 Finanzas", "🛠️ Soportes", "⚙️ Configuración"],
     key="nav_principal",
     label_visibility="collapsed"
 )
@@ -1048,9 +1152,59 @@ elif menu == "🛒 Vender Perfiles":
                         st.session_state.carrito = []
                         st.rerun()
 
-# ==============================================================================
+# ================================================================================
+# MÓDULO DE IMPORTACIÓN DESDE EXCEL
+# ================================================================================
+elif menu == "📥 Importar Excel":
+    st.header("📥 Importar registros desde Excel")
+    st.write("Carga el archivo .xlsx original. No necesitas convertirlo a CSV.")
+    st.warning("La importación es aditiva: no borra tablas ni reemplaza datos. Revisa la vista previa antes de guardar. Los pagos históricos no se crean automáticamente porque el Excel no permite confirmar con seguridad qué cobros están registrados.")
+    archivo_excel = st.file_uploader("Selecciona tu Excel de plataformas", type=["xlsx", "xls"], key="subir_excel_registros")
+    if archivo_excel is not None:
+        try:
+            df_import_inv, df_import_cli, avisos_import = preparar_importacion_excel(archivo_excel)
+            inv_actual = leer_tabla("inventario", COLUMNAS_INV)
+            cli_actual = leer_tabla("clientes", COLUMNAS_CLI)
+            if not inv_actual.empty:
+                claves_inv = set((inv_actual["Plataforma"].str.upper().str.strip() + "|" + inv_actual["Correo"].str.lower().str.strip() + "|" + inv_actual["Perfil_Pantalla"].str.lower().str.strip()).tolist())
+                df_import_inv = df_import_inv[~(df_import_inv["Plataforma"].str.upper().str.strip() + "|" + df_import_inv["Correo"].str.lower().str.strip() + "|" + df_import_inv["Perfil_Pantalla"].str.lower().str.strip()).isin(claves_inv)]
+            if not cli_actual.empty:
+                def clave_cliente(df):
+                    return (df["Plataforma"].str.upper().str.strip() + "|" + df["Correo"].str.lower().str.strip() + "|" + df["Cliente"].str.lower().str.strip() + "|" + df["Fecha_Inicio"].str.strip() + "|" + df["Fecha_Corte"].str.strip())
+                claves_cli = set(clave_cliente(cli_actual).tolist())
+                df_import_cli = df_import_cli[~clave_cliente(df_import_cli).isin(claves_cli)]
+            st.subheader("Resumen de la vista previa")
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Cuentas/perfiles nuevos", len(df_import_inv))
+            m2.metric("Clientes nuevos", len(df_import_cli))
+            m3.metric("Hojas leídas", len(pd.ExcelFile(archivo_excel).sheet_names))
+            if avisos_import:
+                for aviso in avisos_import:
+                    st.info(aviso)
+            with st.expander("Revisar inventario que se agregará", expanded=False):
+                st.dataframe(df_import_inv.drop(columns=["Clave"], errors="ignore"), use_container_width=True, hide_index=True)
+            with st.expander("Revisar clientes que se agregarán", expanded=True):
+                st.dataframe(df_import_cli.drop(columns=["Clave_Spotify"], errors="ignore"), use_container_width=True, hide_index=True)
+            st.caption("Por seguridad, las claves no se muestran en las vistas previas. Los perfiles extra cuya cuenta matriz no se pueda identificar no deben asignarse manualmente sin revisar el Excel.")
+            confirmar_importacion = st.checkbox("Confirmo que revisé la vista previa y quiero agregar solo los registros nuevos.", key="confirmar_import_excel")
+            if st.button("🚀 Importar registros a Supabase", type="primary", disabled=not confirmar_importacion, key="btn_importar_excel_supabase"):
+                if len(df_import_inv) == 0 and len(df_import_cli) == 0:
+                    st.info("No hay registros nuevos para importar.")
+                else:
+                    ok_inv = True if df_import_inv.empty else agregar_filas("inventario", df_import_inv, COLUMNAS_INV)
+                    ok_cli = True if df_import_cli.empty else agregar_filas("clientes", df_import_cli, COLUMNAS_CLI)
+                    if ok_inv and ok_cli:
+                        st.success(f"Importación terminada. Se agregaron {len(df_import_inv)} registros de inventario y {len(df_import_cli)} clientes. No se eliminaron datos existentes.")
+                        st.cache_data.clear()
+                    else:
+                        st.error("La importación no terminó completamente. Revisa los errores mostrados y verifica en Supabase qué tabla recibió los datos antes de volver a intentar.")
+        except Exception as e:
+            st.error(f"No se pudo leer el Excel: {e}")
+            st.caption("Comprueba que sea un archivo .xlsx válido y que sus hojas sigan el formato del libro original.")
+
+# ================================================================================
 # MÓDULO 3: BASE DE DATOS
-# ==============================================================================
+# ================================================================================
 elif menu == "🗃️ Base de Datos":
     st.header("🗃️ Gestor de Bases de Datos")
     if "aviso_bd" in st.session_state:

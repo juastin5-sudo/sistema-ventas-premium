@@ -1311,20 +1311,37 @@ elif menu == "💰 Finanzas":
     st.markdown("### 📋 Catálogo de Venta al Público")
     df_pre = leer_tabla("precios", COLUMNAS_PRE)
 
-    # Cada plataforma tiene un producto extra independiente en el catálogo.
-    # Precio/costo inicial del extra: $4 venta / $3 costo; Finanzas permite editarlos.
-    plataformas_normales = df_pre[~df_pre["Plataforma"].astype(str).str.endswith(" EXTRA")]["Plataforma"].astype(str).tolist()
-    extras_faltantes = []
-    for plat_catalogo in plataformas_normales:
-        nombre_extra = f"{plat_catalogo} EXTRA"
-        if nombre_extra not in df_pre["Plataforma"].astype(str).values:
-            extras_faltantes.append({"Plataforma": nombre_extra, "Costo_Matriz": "3.00", "Precio_Venta_Perfil": "4.00"})
-    if extras_faltantes:
-        if agregar_filas("precios", pd.DataFrame(extras_faltantes), COLUMNAS_PRE):
-            df_pre = pd.concat([df_pre, pd.DataFrame(extras_faltantes)], ignore_index=True)
-
+    # No recrear automáticamente productos que el usuario haya eliminado.
+    # Los productos EXTRA faltantes se pueden volver a crear manualmente desde el formulario.
     st.caption("Los productos terminados en EXTRA son precios independientes de venta; no representan cuentas ni plataformas adicionales en el inventario.")
     st.table(df_pre[["Plataforma", "Costo_Matriz", "Precio_Venta_Perfil"]])
+
+    # Eliminar un producto del catálogo sin borrar clientes, inventario ni pagos.
+    st.markdown("#### 🗑️ Eliminar servicio del catálogo")
+    if df_pre.empty:
+        st.info("No hay productos en el catálogo para eliminar.")
+    else:
+        productos_catalogo = df_pre["Plataforma"].astype(str).tolist()
+        producto_borrar = st.selectbox(
+            "Selecciona el servicio que ya no vendes",
+            options=productos_catalogo,
+            key="fin_producto_borrar"
+        )
+        st.warning("Esto elimina el producto únicamente de la tabla precios. No borra clientes, servicios vendidos, inventario ni pagos. Si eliminas un producto EXTRA, no se volverá a crear automáticamente.")
+        confirmar_borrado_producto = st.checkbox(
+            f"Confirmo que quiero eliminar {producto_borrar} del catálogo",
+            key="fin_confirmar_borrado_producto"
+        )
+        if st.button(
+            "🗑️ Borrar servicio del catálogo",
+            type="secondary",
+            disabled=not confirmar_borrado_producto,
+            key="fin_borrar_producto_catalogo"
+        ):
+            df_pre_nuevo = df_pre[df_pre["Plataforma"].astype(str) != str(producto_borrar)].copy()
+            guardar_tabla("precios", df_pre_nuevo, COLUMNAS_PRE)
+            st.success(f"Se eliminó {producto_borrar} del catálogo de venta al público.")
+            st.rerun()
     
     with st.form("form_add_precio"):
         st.markdown("#### ✏️ Agregar o Editar Precio de Producto")

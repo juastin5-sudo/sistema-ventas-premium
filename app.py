@@ -739,7 +739,7 @@ if menu == "📌 Panel Diario":
                         hc1.caption(estado_cli)
                         hc2.code(telefono_cli, language="markdown")
 
-                        with st.form(key=f"form_cobro_{cli}"):
+                        with st.container():
                             checklines_seleccionados = []
                             total_usd_combo = 0.0
                             txt_serv = ""
@@ -761,10 +761,15 @@ if menu == "📌 Panel Diario":
 
                             c_r1, c_r2, c_r3 = st.columns([1, 2, 2])
                             meses_ren = c_r1.number_input("Meses", min_value=1, max_value=12, value=1, key=f"mren_{cli}")
+                            sugerido = 0.0
+                            for i_s in checklines_seleccionados:
+                                m_prev_s = max(int(to_float(df_clientes_raw.loc[i_s, "Meses_Contratados"])), 1)
+                                sugerido += to_float(df_clientes_raw.loc[i_s, "Monto"]) / m_prev_s * meses_ren
+                            sugerido = round(sugerido, 2)
                             opc = c_r2.selectbox("Acción:", ["---", "✅ Sí Renovó (Extender)", "❌ No Renovó (Cortar)"], key=f"acc_{cli}")
-                            monto_recibido = c_r3.number_input("Monto recibido ($) · 0 = precio normal", min_value=0.0, step=0.5, value=0.0, key=f"mrec_{cli}")
+                            monto_recibido = c_r3.number_input("Monto recibido ($)", min_value=0.0, step=0.5, value=float(sugerido), key=f"mrec_{cli}_{meses_ren}_{sugerido}")
 
-                            if st.form_submit_button("⚡ Procesar", type="primary"):
+                            if st.button("⚡ Procesar", type="primary", key=f"proc_{cli}"):
                                 if opc == "---":
                                     st.error("⚠️ Elige acción.")
                                 elif not checklines_seleccionados:

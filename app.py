@@ -7,6 +7,8 @@ import requests
 import json
 import zipfile
 import io
+import hashlib
+import unicodedata
 from datetime import date, datetime, timedelta
 
 # ==============================================================================
@@ -57,16 +59,16 @@ st.markdown("""
             background-color: #17152e !important;
             border: 1px solid rgba(255, 255, 255, 0.05) !important;
             border-radius: 16px !important;
-            padding: 2rem !important;
-            box-shadow: 0 12px 40px rgba(0, 0, 0, 0.3) !important;
-            margin-bottom: 2rem !important;
+            padding: 1.1rem 1.3rem !important;
+            box-shadow: 0 6px 20px rgba(0, 0, 0, 0.22) !important;
+            margin-bottom: 0.8rem !important;
         }
 
         div[data-testid="stMetric"] {
             background: rgba(255, 255, 255, 0.02) !important;
             border: 1px solid rgba(255, 255, 255, 0.05) !important;
             border-radius: 14px !important;
-            padding: 1.2rem 1.5rem !important;
+            padding: 0.7rem 1rem !important;
             transition: all 0.3s ease !important;
         }
         
@@ -82,20 +84,20 @@ st.markdown("""
 
         div[data-testid="stMetricLabel"] > div {
             color: #9aa0a6 !important;
-            font-size: 0.85rem !important;
-            text-transform: uppercase !important;
+            font-size: 0.78rem !important;
+            text-transform: none !important;
             font-weight: 600 !important;
         }
 
         div[data-testid="stMetricValue"] {
-            font-size: 1.8rem !important;
+            font-size: 1.45rem !important;
             font-weight: 700 !important;
             color: #ffffff !important;
         }
 
         .stButton > button {
             border-radius: 10px !important;
-            padding: 0.6rem 1.8rem !important;
+            padding: 0.45rem 1.1rem !important;
             font-weight: 600 !important;
             transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1) !important;
         }
@@ -183,7 +185,7 @@ st.markdown("""
         [data-testid="stTable"] td { padding: 0.65rem 0.9rem !important; border-bottom: 1px solid rgba(255,255,255,0.04) !important; }
         [data-testid="stTable"] tr:hover td { background: rgba(139, 92, 246, 0.06) !important; }
 
-        hr { border-color: rgba(255, 255, 255, 0.05) !important; margin: 2.5rem 0 !important; }
+        hr { border-color: rgba(255, 255, 255, 0.05) !important; margin: 1.1rem 0 !important; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -350,6 +352,47 @@ def costo_con_extras(df_inv, plataforma, correo, costo_base):
     ext = df_inv[(df_inv["Plataforma"] == plataforma) & (df_inv["IP_Region"] == f"EXTRA de {correo}")].drop_duplicates(subset=["Correo"])
     c_ext = sum([to_float(x) for x in ext["Costo_Matriz"]])
     return to_float(costo_base) + c_ext, c_ext, len(ext)
+
+def clave_nombre(n):
+    """Nombre normalizado para comparar: sin mayúsculas, tildes ni espacios repetidos."""
+    t = unicodedata.normalize("NFKD", str(n))
+    t = "".join(ch for ch in t if not unicodedata.combining(ch))
+    return " ".join(t.casefold().split())
+
+def nombre_canonico(df_otros, nuevo):
+    """Si ya existe otro cliente con ese nombre (sin importar mayúsculas, tildes o espacios),
+    devuelve (su escritura exacta, True). Si no existe, devuelve (nuevo, False)."""
+    nuevo = " ".join(str(nuevo).split())
+    if df_otros.empty:
+        return nuevo, False
+    k = clave_nombre(nuevo)
+    coinciden = df_otros[df_otros["Cliente"].apply(clave_nombre) == k]["Cliente"]
+    if coinciden.empty:
+        return nuevo, False
+    if nuevo in coinciden.values:
+        return nuevo, True
+    return coinciden.value_counts().index[0], True
+
+def telefono_de(df_cli_actual):
+    """Primer teléfono 'real' (7 o más dígitos) entre los servicios del cliente; si no hay, el primero."""
+    tels = [str(t) for t in df_cli_actual["Telefono"].tolist()]
+    for t in tels:
+        if sum(ch.isdigit() for ch in t) >= 7:
+            return t
+    return tels[0] if tels else ""
+
+def tarjeta():
+    """Recuadro con borde (si la versión de Streamlit lo permite)."""
+    try:
+        return st.container(border=True)
+    except TypeError:
+        return st.container()
+
+def etiqueta_cobro(r):
+    d = r["dias"]
+    ic = "🔴" if d < 0 else ("🟡" if d == 0 else "🔵")
+    cuando = f"hace {abs(d)} d" if d < 0 else ("hoy" if d == 0 else f"en {d} d")
+    return f"{ic} {r['cli']} · {r['n']} serv. · ${r['total']:.2f} · {cuando}"
 
 def buscar_fila_inv(df_inv, fila_cli):
     """Índice de la pantalla del inventario que usa un servicio de cliente (o None)."""
@@ -551,7 +594,7 @@ if menu == "📌 Panel Diario":
             total_mat += tot_m
             d_m = int(r_m["Dias"])
             cuando = f"VENCIDA hace {abs(d_m)} días" if d_m < 0 else ("vence HOY" if d_m == 0 else f"vence en {d_m} días")
-            avisos_mat.append(f"- **{r_m['Plataforma']}** ({r_m['Correo']}): {cuando} | ${tot_m:.2f}")
+            avisos_mat.append(f"{r_m['Plataforma']} ({cuando})")
         n_mat = len(c_urg)
 
     n_pin = int((df_inv_res["Estado"] == "🔴 En Revisión").sum()) if not df_inv_res.empty else 0
@@ -565,9 +608,8 @@ if menu == "📌 Panel Diario":
 
     if avisos_mat:
         st.warning(
-            f"⚠️ **Paga estas cuentas matrices para que no se caigan (aviso {DIAS_AVISO_MATRIZ} días antes):**\n\n"
-            + "\n".join(avisos_mat)
-            + f"\n\n**Total a pagar: ${total_mat:,.2f} | {total_mat * st.session_state.tasa_cambio:,.2f} Bs**"
+            f"⚠️ **Cuentas matrices por pagar ({len(avisos_mat)}):** " + " · ".join(avisos_mat)
+            + f"  \n**Total: ${total_mat:,.2f} | {total_mat * st.session_state.tasa_cambio:,.2f} Bs**"
         )
 
     if "aviso_corte" in st.session_state:
@@ -575,169 +617,183 @@ if menu == "📌 Panel Diario":
 
     en_rev_top = df_inv_res[df_inv_res["Estado"] == "🔴 En Revisión"] if not df_inv_res.empty else df_inv_res
     if not en_rev_top.empty:
-        st.error(f"🔑 **{len(en_rev_top)} pantalla(s) por limpiar.** Cambia el PIN en la plataforma (en Spotify, saca al cliente del plan), anótalo aquí y pulsa Reactivar para volver a ponerla a la venta.")
-        for idx_r, row_r in en_rev_top.iterrows():
-            es_spot_r = row_r["Plataforma"] == "SPOTIFY"
-            with st.container():
-                st.markdown(f"🔴 **{row_r['Plataforma']}** | Perfil anterior: **{row_r['Perfil_Pantalla']}**")
-                cr1, cr2, cr3 = st.columns(3)
-                with cr1:
-                    st.code(row_r["Correo"], language="markdown")
-                with cr2:
-                    st.code(row_r["Clave"], language="markdown")
-                with cr3:
-                    if es_spot_r:
-                        nombre_cupo = st.text_input("Nombre del cupo libre:", value="Cupo libre" if "@" in str(row_r["Perfil_Pantalla"]) else str(row_r["Perfil_Pantalla"]), key=f"rn_{idx_r}")
-                        if st.button("✅ Reactivar", key=f"rbs_{idx_r}", type="primary"):
-                            df_inv_res.at[idx_r, "Estado"] = "Disponible"
-                            df_inv_res.at[idx_r, "Perfil_Pantalla"] = nombre_cupo.strip() or "Cupo libre"
-                            guardar_tabla("inventario", df_inv_res, COLUMNAS_INV)
-                            st.rerun()
-                    else:
-                        nuevo_pin_r = st.text_input("NUEVO PIN:", value=str(row_r["PIN"]), key=f"rp_{idx_r}")
-                        if st.button("✅ Reactivar", key=f"rb_{idx_r}", type="primary"):
-                            df_inv_res.at[idx_r, "Estado"] = "Disponible"
-                            df_inv_res.at[idx_r, "PIN"] = str(nuevo_pin_r)
-                            guardar_tabla("inventario", df_inv_res, COLUMNAS_INV)
-                            st.rerun()
-        st.markdown("---")
+        with st.expander(f"🔑 Pantallas por limpiar ({len(en_rev_top)}): cambia el PIN y reactiva", expanded=len(en_rev_top) <= 3):
+            st.caption("Cambia el PIN en la plataforma (en Spotify, saca al cliente del plan), anótalo aquí y pulsa Reactivar para ponerla otra vez a la venta.")
+            for idx_r, row_r in en_rev_top.iterrows():
+                es_spot_r = row_r["Plataforma"] == "SPOTIFY"
+                cr0, cr1, cr2, cr3, cr4 = st.columns([2, 3, 2, 2, 2])
+                cr0.markdown(f"**{row_r['Plataforma']}**  \n{row_r['Perfil_Pantalla']}")
+                cr1.code(row_r["Correo"], language="markdown")
+                cr2.code(row_r["Clave"], language="markdown")
+                if es_spot_r:
+                    nombre_cupo = cr3.text_input("Nombre del cupo libre", value="Cupo libre" if "@" in str(row_r["Perfil_Pantalla"]) else str(row_r["Perfil_Pantalla"]), key=f"rn_{idx_r}", label_visibility="collapsed", placeholder="Nombre del cupo")
+                    if cr4.button("✅ Reactivar", key=f"rbs_{idx_r}", type="primary", use_container_width=True):
+                        df_inv_res.at[idx_r, "Estado"] = "Disponible"
+                        df_inv_res.at[idx_r, "Perfil_Pantalla"] = nombre_cupo.strip() or "Cupo libre"
+                        guardar_tabla("inventario", df_inv_res, COLUMNAS_INV)
+                        st.rerun()
+                else:
+                    nuevo_pin_r = cr3.text_input("Nuevo PIN", value=str(row_r["PIN"]), key=f"rp_{idx_r}", label_visibility="collapsed", placeholder="Nuevo PIN")
+                    if cr4.button("✅ Reactivar", key=f"rb_{idx_r}", type="primary", use_container_width=True):
+                        df_inv_res.at[idx_r, "Estado"] = "Disponible"
+                        df_inv_res.at[idx_r, "PIN"] = str(nuevo_pin_r)
+                        guardar_tabla("inventario", df_inv_res, COLUMNAS_INV)
+                        st.rerun()
 
     pendientes_activacion = df_clientes_raw[df_clientes_raw["Estado_Servicio"] == "Pendiente"]
-    
+
     if not pendientes_activacion.empty:
-        st.markdown("---")
-        st.subheader("⏳ Pendientes por Activar (En Pausa)")
-        for idx, row in pendientes_activacion.iterrows():
-            st.warning(f"🟡 **CLIENTE: {row['Cliente']}** | Plataforma: {row['Plataforma']}")
-            col_p1, col_p2, col_p3 = st.columns([2,2,1])
-            with col_p1:
-                st.markdown("**Correo a activar:**")
-                st.code(row['Correo'], language="markdown")
-            with col_p2:
+        with st.expander(f"⏳ Pendientes por activar ({len(pendientes_activacion)})", expanded=len(pendientes_activacion) <= 3):
+            for idx, row in pendientes_activacion.iterrows():
+                cp0, cp1, cp2, cp3 = st.columns([2, 3, 2, 2])
+                cp0.markdown(f"**{row['Cliente']}**  \n{row['Plataforma']}")
+                cp1.code(row['Correo'], language="markdown")
                 if row['Plataforma'] == "SPOTIFY" and row['Clave_Spotify'] != "":
-                    st.markdown("**Contraseña del Cliente:**")
-                    st.code(row['Clave_Spotify'], language="markdown")
-                else:
-                    st.write(" ")
-            with col_p3:
-                st.write(" ")
-                if st.button("✅ Activar", key=f"activar_{str(idx)}", type="primary"):
+                    cp2.code(row['Clave_Spotify'], language="markdown")
+                if cp3.button("✅ Activar", key=f"activar_{str(idx)}", type="primary", use_container_width=True):
                     meses = int(to_float(row.get('Meses_Contratados', 1)))
                     df_clientes_raw.at[idx, "Fecha_Inicio"] = str(date.today())
                     df_clientes_raw.at[idx, "Fecha_Corte"] = str(sumar_meses(date.today(), meses if meses > 0 else 1))
                     df_clientes_raw.at[idx, "Estado_Servicio"] = "Activo"
                     guardar_tabla("clientes", df_clientes_raw, COLUMNAS_CLI)
-                    st.success("¡Activado!")
                     st.rerun()
-        st.markdown("---")
-    
-    col_cobros, col_pagos = st.columns(2)
-    
+
+    col_cobros, col_pagos = st.columns([3, 2])
+
+    # ---------------------------------------------------------------- COBROS (un cliente a la vez)
     with col_cobros:
-        st.subheader("🟢 Cobros a Clientes")
+        st.subheader("🟢 Cobros a clientes")
         activos = df_clientes_raw[df_clientes_raw["Estado_Servicio"] == "Activo"].copy()
+        df_vencidos = pd.DataFrame()
         if not activos.empty:
             activos["Fecha_Real"] = pd.to_datetime(activos["Fecha_Corte"], errors="coerce")
             df_vencidos = activos[(activos["Fecha_Real"].notna()) & ((activos["Fecha_Real"] - hoy_pd).dt.days <= 3)]
-            if not df_vencidos.empty:
-                orden_cli = df_vencidos.assign(D=(df_vencidos["Fecha_Real"] - hoy_pd).dt.days).groupby("Cliente")["D"].min().sort_values(kind="stable")
-                grupo_actual = None
-                for cli in orden_cli.index.tolist():
-                    d_grupo = int(orden_cli[cli])
-                    g_nuevo = "venc" if d_grupo < 0 else ("hoy" if d_grupo == 0 else "prox")
-                    if g_nuevo != grupo_actual:
-                        grupo_actual = g_nuevo
-                        st.markdown({"venc": "#### 🔴 Vencidos", "hoy": "#### 🟡 Cobran hoy", "prox": "#### 🔵 Próximos a vencer"}[g_nuevo])
-                    df_cli_actual = df_vencidos[df_vencidos["Cliente"] == cli].sort_values("Fecha_Real")
-                    telefono_cli = df_cli_actual.iloc[0]["Telefono"]
-                    dias_minimos = (df_cli_actual["Fecha_Real"] - hoy_pd).dt.days.min()
-                    
-                    if dias_minimos < 0:
-                        st.error(f"👤 **{cli.upper()}** | 🔴 Vencido")
-                    elif dias_minimos == 0:
-                        st.warning(f"👤 **{cli.upper()}** | 🟡 Cobra Hoy")
-                    else:
-                        st.info(f"👤 **{cli.upper()}** | 🔵 Próximo")
-                    
-                    with st.form(key=f"form_cobro_{cli}"):
-                        st.code(telefono_cli, language="markdown")
-                        checklines_seleccionados = []
-                        total_usd_combo = 0.0
-                        txt_serv = ""
-                        
-                        for idx_row, row in df_cli_actual.iterrows():
-                            dias = (row["Fecha_Real"] - hoy_pd).days
-                            txt_venc = f"Hace {abs(dias)}d" if dias < 0 else ("Hoy" if dias == 0 else f"En {dias}d")
-                            m_item = to_float(row.get('Monto', 0))
-                            if st.checkbox(f"• {row['Plataforma']} ({row['Perfil_Pantalla']}) | {txt_venc} | ${m_item:.2f}", value=True, key=f"chk_{str(idx_row)}"):
-                                checklines_seleccionados.append(idx_row)
-                                total_usd_combo += m_item
-                                txt_serv += f"- {row['Plataforma']} ({row['Perfil_Pantalla']})\n"
-                        
-                        t_bs = total_usd_combo * st.session_state.tasa_cambio
-                        st.markdown(f"**Total: ${total_usd_combo:.2f} USD | {t_bs:,.2f} Bs**")
-                        
-                        with st.expander("📋 Ver Mensaje"):
-                            st.code(cargar_plantilla("cobro").replace("[cliente]", cli).replace("[servicios]", txt_serv.strip()).replace("[monto_usd]", f"{total_usd_combo:.2f}").replace("[monto_bs]", f"{t_bs:,.2f}").strip(), language="markdown")
-                        
-                        c_r1, c_r2 = st.columns([1,2])
-                        with c_r1:
-                            meses_ren = st.number_input("Meses", min_value=1, max_value=12, value=1, key=f"mren_{cli}")
-                        with c_r2:
-                            opc = st.selectbox("Acción:", ["---", "✅ Sí Renovó (Extender)", "❌ No Renovó (Cortar)"], key=f"acc_{cli}")
-                        monto_recibido = st.number_input("Monto total recibido ($). Déjalo en 0 para usar el precio normal", min_value=0.0, step=0.5, value=0.0, key=f"mrec_{cli}")
-                        
-                        if st.form_submit_button("⚡ Procesar", type="primary"):
-                            if opc == "---":
-                                st.error("⚠️ Elige acción.")
-                            elif not checklines_seleccionados:
-                                st.error("⚠️ Marca pantalla.")
-                            else:
-                                df_full_cli = df_clientes_raw.copy()
-                                df_full_inv = leer_tabla("inventario", COLUMNAS_INV)
-                                if "Sí Renovó" in opc:
-                                    pagos_ren = []
-                                    for idx_row in checklines_seleccionados:
-                                        f_vieja = datetime.strptime(df_full_cli.loc[idx_row, "Fecha_Corte"], "%Y-%m-%d").date()
-                                        meses_prev = max(int(to_float(df_full_cli.loc[idx_row, "Meses_Contratados"])), 1)
-                                        monto_prev = to_float(df_full_cli.loc[idx_row, "Monto"])
-                                        if monto_recibido > 0:
-                                            monto_ren = monto_recibido / len(checklines_seleccionados)
-                                        else:
-                                            monto_ren = monto_prev / meses_prev * meses_ren
-                                        df_full_cli.at[idx_row, "Meses_Contratados"] = str(meses_ren)
-                                        df_full_cli.at[idx_row, "Fecha_Corte"] = str(sumar_meses(f_vieja, meses_ren))
-                                        df_full_cli.at[idx_row, "Monto"] = str(round(monto_ren, 2))
-                                        pagos_ren.append({
-                                            "Fecha": str(date.today()), "Cliente": df_full_cli.loc[idx_row, "Cliente"],
-                                            "Plataforma": df_full_cli.loc[idx_row, "Plataforma"], "Correo": df_full_cli.loc[idx_row, "Correo"],
-                                            "Perfil_Pantalla": df_full_cli.loc[idx_row, "Perfil_Pantalla"], "Monto": str(round(monto_ren, 2)),
-                                            "Metodo_Pago": df_full_cli.loc[idx_row, "Metodo_Pago"], "Meses": str(meses_ren), "Tipo": "Renovación"
-                                        })
-                                    guardar_tabla("clientes", df_full_cli, COLUMNAS_CLI)
-                                    registrar_pagos(pagos_ren)
-                                    st.rerun()
-                                elif "No Renovó" in opc:
-                                    i_borrar = []
-                                    for idx_row in checklines_seleccionados:
-                                        r_d = df_full_cli.loc[idx_row]
-                                        i_inv_nr = buscar_fila_inv(df_full_inv, r_d)
-                                        if i_inv_nr is not None:
-                                            df_full_inv.at[i_inv_nr, "Estado"] = "🔴 En Revisión"
-                                        i_borrar.append(idx_row)
-                                    guardar_tabla("clientes", df_full_cli.drop(i_borrar), COLUMNAS_CLI)
-                                    guardar_tabla("inventario", df_full_inv, COLUMNAS_INV)
-                                    st.session_state.aviso_corte = f"✂️ Cortaste {len(i_borrar)} servicio(s). Revisa abajo la sección '🔑 pantallas por limpiar' para cambiar el PIN."
-                                    st.rerun()
-                    st.markdown("---")
-            else:
-                st.success("¡Todo al día! 😎")
-        else:
-            st.write("No hay cobros pendientes.")
 
+        if activos.empty:
+            st.write("No hay cobros pendientes.")
+        elif df_vencidos.empty:
+            st.success("¡Todo al día! 😎")
+        else:
+            resumen_cli = []
+            for cli_n, g_cli in df_vencidos.groupby("Cliente", sort=False):
+                resumen_cli.append({
+                    "cli": cli_n,
+                    "dias": int((g_cli["Fecha_Real"] - hoy_pd).dt.days.min()),
+                    "n": len(g_cli),
+                    "total": sum([to_float(x) for x in g_cli["Monto"]]),
+                })
+            resumen_cli.sort(key=lambda r: (r["dias"], str(r["cli"]).lower()))
+            n_v = sum(1 for r in resumen_cli if r["dias"] < 0)
+            n_h = sum(1 for r in resumen_cli if r["dias"] == 0)
+            n_p = sum(1 for r in resumen_cli if r["dias"] > 0)
+
+            filtro_cob = st.radio(
+                "Mostrar",
+                [f"Todos ({len(resumen_cli)})", f"🔴 Vencidos ({n_v})", f"🟡 Hoy ({n_h})", f"🔵 Próximos ({n_p})"],
+                horizontal=True, label_visibility="collapsed"
+            )
+            if filtro_cob.startswith("🔴"):
+                lista_cob = [r for r in resumen_cli if r["dias"] < 0]
+            elif filtro_cob.startswith("🟡"):
+                lista_cob = [r for r in resumen_cli if r["dias"] == 0]
+            elif filtro_cob.startswith("🔵"):
+                lista_cob = [r for r in resumen_cli if r["dias"] > 0]
+            else:
+                lista_cob = resumen_cli
+
+            if not lista_cob:
+                st.info("No hay clientes en esta categoría.")
+            else:
+                etiquetas = [etiqueta_cobro(r) for r in lista_cob]
+                sel_et = st.selectbox("Cliente a atender", etiquetas, label_visibility="collapsed")
+                cli = lista_cob[etiquetas.index(sel_et)]["cli"]
+                df_cli_actual = df_vencidos[df_vencidos["Cliente"] == cli].sort_values("Fecha_Real")
+                telefono_cli = telefono_de(df_cli_actual)
+                dias_minimos = int((df_cli_actual["Fecha_Real"] - hoy_pd).dt.days.min())
+                if dias_minimos < 0:
+                    estado_cli = f"🔴 Vencido hace {abs(dias_minimos)} d"
+                elif dias_minimos == 0:
+                    estado_cli = "🟡 Cobra hoy"
+                else:
+                    estado_cli = f"🔵 Vence en {dias_minimos} d"
+
+                hc1, hc2 = st.columns([3, 2])
+                hc1.markdown(f"#### {cli}")
+                hc1.caption(estado_cli)
+                hc2.code(telefono_cli, language="markdown")
+
+                with st.form(key=f"form_cobro_{cli}"):
+                    checklines_seleccionados = []
+                    total_usd_combo = 0.0
+                    txt_serv = ""
+
+                    for idx_row, row in df_cli_actual.iterrows():
+                        dias = (row["Fecha_Real"] - hoy_pd).days
+                        txt_venc = f"Hace {abs(dias)}d" if dias < 0 else ("Hoy" if dias == 0 else f"En {dias}d")
+                        m_item = to_float(row.get('Monto', 0))
+                        if st.checkbox(f"• {row['Plataforma']} ({row['Perfil_Pantalla']}) | {txt_venc} | ${m_item:.2f}", value=True, key=f"chk_{str(idx_row)}"):
+                            checklines_seleccionados.append(idx_row)
+                            total_usd_combo += m_item
+                            txt_serv += f"- {row['Plataforma']} ({row['Perfil_Pantalla']})\n"
+
+                    t_bs = total_usd_combo * st.session_state.tasa_cambio
+                    st.markdown(f"**Total: ${total_usd_combo:.2f} USD | {t_bs:,.2f} Bs**")
+
+                    with st.expander("📋 Ver mensaje"):
+                        st.code(cargar_plantilla("cobro").replace("[cliente]", cli).replace("[servicios]", txt_serv.strip()).replace("[monto_usd]", f"{total_usd_combo:.2f}").replace("[monto_bs]", f"{t_bs:,.2f}").strip(), language="markdown")
+
+                    c_r1, c_r2, c_r3 = st.columns([1, 2, 2])
+                    meses_ren = c_r1.number_input("Meses", min_value=1, max_value=12, value=1, key=f"mren_{cli}")
+                    opc = c_r2.selectbox("Acción:", ["---", "✅ Sí Renovó (Extender)", "❌ No Renovó (Cortar)"], key=f"acc_{cli}")
+                    monto_recibido = c_r3.number_input("Monto recibido ($) · 0 = precio normal", min_value=0.0, step=0.5, value=0.0, key=f"mrec_{cli}")
+
+                    if st.form_submit_button("⚡ Procesar", type="primary"):
+                        if opc == "---":
+                            st.error("⚠️ Elige acción.")
+                        elif not checklines_seleccionados:
+                            st.error("⚠️ Marca pantalla.")
+                        else:
+                            df_full_cli = df_clientes_raw.copy()
+                            df_full_inv = leer_tabla("inventario", COLUMNAS_INV)
+                            if "Sí Renovó" in opc:
+                                pagos_ren = []
+                                for idx_row in checklines_seleccionados:
+                                    f_vieja = datetime.strptime(df_full_cli.loc[idx_row, "Fecha_Corte"], "%Y-%m-%d").date()
+                                    meses_prev = max(int(to_float(df_full_cli.loc[idx_row, "Meses_Contratados"])), 1)
+                                    monto_prev = to_float(df_full_cli.loc[idx_row, "Monto"])
+                                    if monto_recibido > 0:
+                                        monto_ren = monto_recibido / len(checklines_seleccionados)
+                                    else:
+                                        monto_ren = monto_prev / meses_prev * meses_ren
+                                    df_full_cli.at[idx_row, "Meses_Contratados"] = str(meses_ren)
+                                    df_full_cli.at[idx_row, "Fecha_Corte"] = str(sumar_meses(f_vieja, meses_ren))
+                                    df_full_cli.at[idx_row, "Monto"] = str(round(monto_ren, 2))
+                                    pagos_ren.append({
+                                        "Fecha": str(date.today()), "Cliente": df_full_cli.loc[idx_row, "Cliente"],
+                                        "Plataforma": df_full_cli.loc[idx_row, "Plataforma"], "Correo": df_full_cli.loc[idx_row, "Correo"],
+                                        "Perfil_Pantalla": df_full_cli.loc[idx_row, "Perfil_Pantalla"], "Monto": str(round(monto_ren, 2)),
+                                        "Metodo_Pago": df_full_cli.loc[idx_row, "Metodo_Pago"], "Meses": str(meses_ren), "Tipo": "Renovación"
+                                    })
+                                guardar_tabla("clientes", df_full_cli, COLUMNAS_CLI)
+                                registrar_pagos(pagos_ren)
+                                st.rerun()
+                            elif "No Renovó" in opc:
+                                i_borrar = []
+                                for idx_row in checklines_seleccionados:
+                                    r_d = df_full_cli.loc[idx_row]
+                                    i_inv_nr = buscar_fila_inv(df_full_inv, r_d)
+                                    if i_inv_nr is not None:
+                                        df_full_inv.at[i_inv_nr, "Estado"] = "🔴 En Revisión"
+                                    i_borrar.append(idx_row)
+                                guardar_tabla("clientes", df_full_cli.drop(i_borrar), COLUMNAS_CLI)
+                                guardar_tabla("inventario", df_full_inv, COLUMNAS_INV)
+                                st.session_state.aviso_corte = f"✂️ Cortaste {len(i_borrar)} servicio(s). Revisa arriba '🔑 Pantallas por limpiar' para cambiar el PIN."
+                                st.rerun()
+
+    # ---------------------------------------------------------------- PAGOS DE MATRICES
     with col_pagos:
-        st.subheader("🔴 Pagos de Cuentas Matrices")
-        df_inv = leer_tabla("inventario", COLUMNAS_INV)
+        st.subheader("🔴 Pagos de cuentas matrices")
+        df_inv = df_inv_res
         if not df_inv.empty:
             c_uni = df_inv.drop_duplicates(subset=["Correo", "Plataforma"]).copy()
             c_uni = c_uni[~c_uni["IP_Region"].str.startswith("EXTRA")].copy()
@@ -746,23 +802,24 @@ if menu == "📌 Panel Diario":
             if not p_pend.empty:
                 for idx, row in p_pend.sort_values(by="Fecha_Real").iterrows():
                     dias = (row["Fecha_Real"] - hoy_pd).days
-                    est = f"🚨 VENCIDA hace {abs(dias)}d" if dias < 0 else ("🔥 PAGAR HOY" if dias == 0 else f"⏳ En {dias}d")
+                    est = f"🚨 Vencida hace {abs(dias)} d" if dias < 0 else ("🔥 Pagar hoy" if dias == 0 else f"⏳ En {dias} d")
                     c_mat, c_extra, n_extra = costo_con_extras(df_inv, row["Plataforma"], row["Correo"], row.get("Costo_Matriz", 0.0))
                     txt_extra = f" (incluye ${c_extra:.2f} de {n_extra} extra)" if c_extra > 0 else ""
-                    st.warning(f"**{row['Plataforma']}** | {est}\n\n💸 Costo: ${c_mat:.2f}{txt_extra} | **{c_mat * st.session_state.tasa_cambio:,.2f} Bs**")
-                    with st.expander(f"📋 Ver Credenciales"):
-                        st.code(row["Correo"], language="markdown")
-                        st.code(row["Clave"], language="markdown")
+                    with tarjeta():
+                        st.markdown(f"**{row['Plataforma']}** · {est}")
+                        st.caption(f"{row['Correo']}  \n💸 ${c_mat:.2f}{txt_extra} · {c_mat * st.session_state.tasa_cambio:,.2f} Bs")
                         base_pago = max(row["Fecha_Real"].date(), date.today())
                         nueva_31 = base_pago + timedelta(days=DIAS_CICLO_MATRIZ)
-                        if st.button(f"✅ Ya pagué (próximo pago: {nueva_31.strftime('%d/%m/%Y')})", key=f"bp31_{str(idx)}", type="primary"):
+                        if st.button(f"✅ Ya pagué → próximo pago {nueva_31.strftime('%d/%m/%Y')}", key=f"bp31_{str(idx)}", type="primary", use_container_width=True):
                             actualizar_fecha_pago(row["Plataforma"], row["Correo"], nueva_31)
                             st.rerun()
-                        n_f = st.date_input("O elige otra fecha:", value=row["Fecha_Real"].date(), key=f"fm_{str(idx)}")
-                        if st.button("💾 Guardar Fecha", key=f"bm_{str(idx)}"):
-                            actualizar_fecha_pago(row["Plataforma"], row["Correo"], n_f)
-                            st.rerun()
-                st.markdown("---")
+                        with st.expander("Credenciales y otra fecha"):
+                            st.code(row["Correo"], language="markdown")
+                            st.code(row["Clave"], language="markdown")
+                            n_f = st.date_input("Próximo pago:", value=row["Fecha_Real"].date(), key=f"fm_{str(idx)}")
+                            if st.button("💾 Guardar fecha", key=f"bm_{str(idx)}"):
+                                actualizar_fecha_pago(row["Plataforma"], row["Correo"], n_f)
+                                st.rerun()
             else:
                 st.success("¡Sin pagos! 🥳")
 
@@ -1068,6 +1125,14 @@ elif menu == "🗃️ Base de Datos":
         st.subheader("Clientes y Fechas")
         df_c = leer_tabla("clientes", COLUMNAS_CLI)
         
+        if "sel_cli_forzado" in st.session_state:
+            st.session_state["busq_cli"] = ""
+            st.session_state["edit_cli_sel"] = st.session_state.pop("sel_cli_forzado")
+            st.session_state.pop("edit_cli_pant", None)
+        if st.session_state.pop("reset_edit_cli", False):
+            st.session_state.pop("edit_cli_sel", None)
+            st.session_state.pop("edit_cli_pant", None)
+
         if not df_c.empty:
             busq_cli = st.text_input("🔍 Buscar (nombre, teléfono, correo, plataforma, perfil...)", key="busq_cli", placeholder="Escribe y la lista se filtra")
             if busq_cli.strip():
@@ -1078,6 +1143,42 @@ elif menu == "🗃️ Base de Datos":
             st.caption(f"Mostrando {len(df_vista_c)} de {len(df_c)} servicios")
             st.dataframe(df_vista_c, hide_index=True)
             
+            grupos_dup = {}
+            for n_c in df_c["Cliente"].unique().tolist():
+                grupos_dup.setdefault(clave_nombre(n_c), []).append(n_c)
+            grupos_dup = {k: v for k, v in grupos_dup.items() if len(v) > 1}
+            if grupos_dup:
+                with st.expander(f"🧹 Clientes duplicados ({len(grupos_dup)}): el mismo nombre escrito distinto", expanded=False):
+                    st.caption("Son el mismo nombre con otra mayúscula, tilde o espacio. Elige cómo quieres que quede y pulsa Unir: todos sus servicios pasan a ese nombre y el Panel Diario los cobra juntos.")
+                    for k_g, variantes in sorted(grupos_dup.items()):
+                        conteo_v = df_c[df_c["Cliente"].isin(variantes)]["Cliente"].value_counts()
+                        variantes_ord = conteo_v.index.tolist()
+                        id_g = hashlib.md5(k_g.encode("utf-8")).hexdigest()[:10]
+                        dg1, dg2 = st.columns([4, 1])
+                        destino = dg1.selectbox(
+                            "Quedará como: " + "  /  ".join(f"{v} ({conteo_v[v]})" for v in variantes_ord),
+                            variantes_ord, key=f"dup_dest_{id_g}"
+                        )
+                        if dg2.button("🔗 Unir", key=f"dup_btn_{id_g}", type="primary", use_container_width=True):
+                            n_afect = int(df_c["Cliente"].isin(variantes).sum())
+                            df_c.loc[df_c["Cliente"].isin(variantes), "Cliente"] = destino
+                            guardar_tabla("clientes", df_c, COLUMNAS_CLI)
+                            st.session_state.aviso_bd = f"¡Unidos! {n_afect} servicio(s) quedaron como «{destino}»."
+                            st.session_state.reset_edit_cli = True
+                            st.rerun()
+                    if len(grupos_dup) > 1:
+                        st.markdown("---")
+                        if st.button("🔗 Unir todos con el nombre más usado de cada uno", key="dup_todos"):
+                            n_tot = 0
+                            for k_g, variantes in grupos_dup.items():
+                                mejor = df_c[df_c["Cliente"].isin(variantes)]["Cliente"].value_counts().index[0]
+                                n_tot += int(df_c["Cliente"].isin(variantes).sum())
+                                df_c.loc[df_c["Cliente"].isin(variantes), "Cliente"] = mejor
+                            guardar_tabla("clientes", df_c, COLUMNAS_CLI)
+                            st.session_state.aviso_bd = f"¡Unidos! Se arreglaron {len(grupos_dup)} cliente(s) duplicado(s) ({n_tot} servicios)."
+                            st.session_state.reset_edit_cli = True
+                            st.rerun()
+
             st.markdown("---")
             st.subheader("✏️ Editar o Eliminar Cliente")
             
@@ -1097,6 +1198,9 @@ elif menu == "🗃️ Base de Datos":
                     
                     df_inv_ed = leer_tabla("inventario", COLUMNAS_INV)
                     with st.form("form_edit_cli"):
+                        n_nombre = st.text_input("Nombre del cliente", value=str(datos_fila["Cliente"]))
+                        n_todos = st.checkbox("Cambiar el nombre en todos los servicios de este cliente", value=True)
+                        st.caption("Si escribes el nombre de un cliente que ya existe (aunque cambien mayúsculas, tildes o espacios), este cliente queda unido a él.")
                         c1, c2, c3 = st.columns(3)
                         n_tel = c1.text_input("Teléfono", value=str(datos_fila["Telefono"]))
                         
@@ -1132,26 +1236,43 @@ elif menu == "🗃️ Base de Datos":
                         liberar_pant = st.checkbox("Al eliminar, liberar su pantalla (queda 🔴 En Revisión para cambiar el PIN)", value=True)
                         col_btn1, col_btn2 = st.columns(2)
                         if col_btn1.form_submit_button("💾 Guardar Cambios", type="primary"):
-                            df_c.at[idx_real, "Telefono"] = str(n_tel)
-                            df_c.at[idx_real, "Fecha_Corte"] = str(n_f_corte)
-                            df_c.at[idx_real, "Estado_Servicio"] = str(n_est)
-                            df_c.at[idx_real, "Monto"] = str(round(n_monto, 2))
-                            inv_cambio = False
-                            nuevo_i_sel = opc_reasig[sel_reasig]
-                            if nuevo_i_sel is not None:
-                                df_c, df_inv_ed = reasignar_servicio(df_c, df_inv_ed, idx_real, nuevo_i_sel, n_corr_cli if spot_cli_e else "", ant_revision)
-                                inv_cambio = True
-                            elif spot_cli_e:
-                                df_c, df_inv_ed = cambiar_correo_spotify(df_c, df_inv_ed, idx_real, n_corr_cli)
-                                inv_cambio = True
-                            if spot_cli_e:
-                                df_c.at[idx_real, "Clave_Spotify"] = str(n_clave_cli)
-                            guardar_tabla("clientes", df_c, COLUMNAS_CLI)
-                            if inv_cambio:
-                                guardar_tabla("inventario", df_inv_ed, COLUMNAS_INV)
-                            st.session_state.aviso_bd = "¡Cliente actualizado en la nube!" + (" Cambié también su pantalla en el inventario." if nuevo_i_sel is not None else "")
-                            st.rerun()
-                            
+                            nombre_final = " ".join(str(n_nombre).split())
+                            if nombre_final == "":
+                                st.error("⚠️ El nombre no puede estar vacío.")
+                            else:
+                                nombre_actual = str(datos_fila["Cliente"])
+                                nota_nombre = ""
+                                if nombre_final != nombre_actual:
+                                    filas_ren = df_c.index[df_c["Cliente"] == nombre_actual].tolist() if n_todos else [idx_real]
+                                    nombre_final, se_unio = nombre_canonico(df_c.drop(index=filas_ren), nombre_final)
+                                    df_c.loc[filas_ren, "Cliente"] = nombre_final
+                                    nota_nombre = f" Nombre: «{nombre_actual}» → «{nombre_final}» ({len(filas_ren)} servicio(s))" + (", unido al cliente que ya existía." if se_unio else ".")
+                                df_c.at[idx_real, "Telefono"] = str(n_tel)
+                                df_c.at[idx_real, "Fecha_Corte"] = str(n_f_corte)
+                                df_c.at[idx_real, "Estado_Servicio"] = str(n_est)
+                                df_c.at[idx_real, "Monto"] = str(round(n_monto, 2))
+                                inv_cambio = False
+                                nuevo_i_sel = opc_reasig[sel_reasig]
+                                if nuevo_i_sel is not None:
+                                    df_c, df_inv_ed = reasignar_servicio(df_c, df_inv_ed, idx_real, nuevo_i_sel, n_corr_cli if spot_cli_e else "", ant_revision)
+                                    inv_cambio = True
+                                elif spot_cli_e:
+                                    df_c, df_inv_ed = cambiar_correo_spotify(df_c, df_inv_ed, idx_real, n_corr_cli)
+                                    inv_cambio = True
+                                if spot_cli_e:
+                                    df_c.at[idx_real, "Clave_Spotify"] = str(n_clave_cli)
+                                guardar_tabla("clientes", df_c, COLUMNAS_CLI)
+                                if inv_cambio:
+                                    guardar_tabla("inventario", df_inv_ed, COLUMNAS_INV)
+                                tels_cli = {"".join(ch for ch in str(t) if ch.isdigit()) for t in df_c[df_c["Cliente"] == nombre_final]["Telefono"]}
+                                tels_cli.discard("")
+                                tels_cli.discard("58")
+                                nota_tel = " ⚠️ Este cliente tiene teléfonos distintos en sus servicios; revísalos." if len(tels_cli) > 1 else ""
+                                st.session_state.aviso_bd = "¡Cliente actualizado en la nube!" + (" Cambié también su pantalla en el inventario." if nuevo_i_sel is not None else "") + nota_nombre + nota_tel
+                                if nombre_final != nombre_actual:
+                                    st.session_state.sel_cli_forzado = nombre_final
+                                st.rerun()
+
                         if col_btn2.form_submit_button("🗑️ Eliminar Registro de la Nube"): 
                             if liberar_pant:
                                 df_inv_lib = leer_tabla("inventario", COLUMNAS_INV)
@@ -1161,6 +1282,7 @@ elif menu == "🗃️ Base de Datos":
                                     guardar_tabla("inventario", df_inv_lib, COLUMNAS_INV)
                             df_c = df_c.drop(idx_real)
                             guardar_tabla("clientes", df_c, COLUMNAS_CLI)
+                            st.session_state.reset_edit_cli = True
                             st.warning("¡Registro borrado para siempre!")
                             st.rerun()
         else:

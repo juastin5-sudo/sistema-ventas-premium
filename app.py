@@ -303,6 +303,174 @@ def agregar_filas(tabla, df, columnas):
     st.cache_data.clear()
     return True
 
+def _texto_excel(v):
+    """Normaliza valores leídos de Excel sin mostrar nan/nat como texto."""
+    if pd.isna(v):
+        return ""
+    if isinstance(v, (datetime, date, pd.Timestamp)):
+        return pd.to_datetime(v).strftime("%Y-%m-%d")
+    texto = str(v).strip()
+    return "" if texto.lower() in {"nan", "nat", "none"} else texto
+
+
+def _fecha_excel(v):
+    """Convierte fechas de Excel (incluidos números seriales) a YYYY-MM-DD."""
+    if pd.isna(v) or str(v).strip() == "":
+        return ""
+    try:
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            # Fechas guardadas por Excel como número de serie.
+            if 20000 <= float(v) <= 80000:
+                return (pd.Timestamp("1899-12-30") + pd.to_timedelta(float(v), unit="D")).strftime("%Y-%m-%d")
+        return pd.to_datetime(v, errors="raise").strftime("%Y-%m-%d")
+    except Exception:
+        return ""
+
+
+def _correo_excel(v):
+    """Limpia saltos de línea y texto adicional que algunas celdas tienen junto al correo."""
+    texto = _texto_excel(v)
+    if not texto:
+        return ""
+    lineas = [x.strip() for x in texto.splitlines() if x.strip()]
+    for linea in lineas:
+        if "@" in linea:
+            return linea
+    return lineas[0] if lineas else ""
+
+
+def preparar_importacion_excel(archivo):
+    """Lee el Excel y prepara inventario/clientes. No escribe nada en Supabase."""
+    # Índices de columna verificados contra los encabezados del libro compartido.
+    # La fila 4 de Excel contiene encabezados; los datos empiezan en la fila 5.
+    mapas = {
+        "NETFLIX":     {"email": 6, "clave": 7, "slot": 8, "pin": 9, "cliente": 11, "inicio": 12, "corte": 14, "fecha_pago": 3, "costo": 0, "monto": 17},
+        "NETFLIX PE":  {"email": 6, "clave": 7, "slot": 8, "pin": 9, "cliente": 11, "inicio": 12, "corte": 14, "fecha_pago": 3, "costo": 0, "monto": 17},
+        "SPOTIFY":     {"email": 7, "clave": 8, "slot": 9, "pin": None, "cliente": 11, "inicio": 12, "corte": 14, "fecha_pago": 3, "costo": 0, "monto": 17},
+        "DISNEY":      {"email": 5, "clave": 6, "slot": 7, "pin": 8, "cliente": 10, "inicio": 11, "corte": 13, "fecha_pago": 3, "costo": 0, "monto": 16},
+        "HBO MAX":     {"email": 5, "clave": 6, "slot": 7, "pin": 8, "cliente": 11, "inicio": 12, "corte": 14, "fecha_pago": 3, "costo": 0, "monto": 17},
+        "AMAZON":      {"email": 6, "clave": 7, "slot": 8, "pin": 9, "cliente": 11, "inicio": 12, "corte": 14, "fecha_pago": 3, "costo": 0, "monto": 17},
+        "CRUNCHY":     {"email": 6, "clave": 7, "slot": 8, "pin": None, "cliente": 10, "inicio": 11, "corte": 13, "fecha_pago": 3, "costo": 0, "monto": 16},
+        "PARAMOUNT +": {"email": 6, "clave": 7, "slot": 8, "pin": None, "cliente": 10, "inicio": 11, "corte": 13, "fecha_pago": 3, "costo": 0, "monto": 16},
+    }
+    inventario, clientes, avisos = [], [], []
+    contenido = archivo.getvalue() if hasattr(archivo, "getvalue") else archivo.read()
+    libro = pd.ExcelFile(io.BytesIO(contenido))
+
+    for hoja in libro.sheet_names:
+        nombre_hoja = str(hoja).strip().upper()
+        mapa = mapas.get(nombre_hoja)
+        if not mapa:
+            avisos.append(f"Hoja no reconocida; no se importó: {hoja}")
+            continue
+        df = libro.parse(sheet_name=hoja, header=None, dtype=object)
+        if df.shape[0] <= 4:
+            avisos.append(f"La hoja {hoja} no contiene filas de datos.")
+            continue
+
+        correo_actual, clave_actual = "", ""
+        fecha_pago_actual, costo_actual = "", "0"
+        numero_perfil = {}
+        filas_sin_correo = 0
+
+        for pos in range(4, len(df)):
+            fila = df.iloc[pos]
+
+            def celda(indice):
+                return fila.iloc[indice] if indice is not None and indice < len(fila) else None
+
+            correo_fila = _correo_excel(celda(mapa["email"]))
+            clave_fila = _texto_excel(celda(mapa["clave"]))
+
+            # Al comenzar una cuenta nueva, no reutilizar por error la clave de la anterior.
+            if correo_fila and correo_fila.casefold() != correo_actual.casefold():
+                correo_actual = correo_fila
+                clave_actual = clave_fila
+                fecha_pago_actual = _fecha_excel(celda(mapa["fecha_pago"]))
+                costo_actual = _texto_excel(celda(mapa["costo"])) or "0"
+            else:
+                if clave_fila:
+                    clave_actual = clave_fila
+                fecha_pago_fila = _fecha_excel(celda(mapa["fecha_pago"]))
+                if fecha_pago_fila:
+                    fecha_pago_actual = fecha_pago_fila
+                costo_fila = _texto_excel(celda(mapa["costo"]))
+                if costo_fila:
+                    costo_actual = costo_fila
+
+            correo = correo_actual
+            clave = clave_actual
+            cliente = _texto_excel(celda(mapa["cliente"]))
+            fecha_inicio = _fecha_excel(celda(mapa["inicio"]))
+            fecha_corte = _fecha_excel(celda(mapa["corte"]))
+            monto_cliente = _texto_excel(celda(mapa["monto"])) or "0"
+            valor_slot = _texto_excel(celda(mapa["slot"]))
+            pin = _texto_excel(celda(mapa["pin"])) if mapa["pin"] is not None else "N/A"
+
+            if cliente.upper() in {"TOTAL", "TOTALES", "GANANCIA", "PRECIO DE CUENTA EN BS."}:
+                continue
+            # No importar filas de resumen ni inventar una cuenta cuando no se conoce el correo.
+            if not any([cliente, fecha_inicio, fecha_corte, valor_slot, pin if pin != "N/A" else ""]):
+                continue
+            if not correo:
+                filas_sin_correo += 1
+                continue
+
+            key_cuenta = (nombre_hoja, correo.casefold())
+            numero_perfil[key_cuenta] = numero_perfil.get(key_cuenta, 0) + 1
+            if nombre_hoja == "SPOTIFY":
+                # La app identifica los cupos Spotify por correo del cliente.
+                slot_label = correo
+            elif valor_slot:
+                slot_label = valor_slot if valor_slot.lower().startswith(("perfil", "cupo", "principal")) else f"Perfil {valor_slot}"
+            else:
+                slot_label = f"Perfil {numero_perfil[key_cuenta]}"
+
+            plataforma = "CRUNCHY ROLL" if nombre_hoja == "CRUNCHY" else ("NETFLIX" if nombre_hoja == "NETFLIX PE" else nombre_hoja)
+            es_extra_pendiente = nombre_hoja == "NETFLIX PE"
+            # La relación con la matriz de los perfiles extra no se adivina.
+            ip_region = "EXTRA PENDIENTE DE ASIGNAR" if es_extra_pendiente else ""
+            # En Spotify la columna "Precio cuenta" no permite saber con seguridad el coste
+            # de cada invitación individual; se deja en cero para no inflar los gastos.
+            costo_inv = "0" if nombre_hoja == "SPOTIFY" else (costo_actual or "0")
+
+            inventario.append({
+                "Plataforma": plataforma, "Correo": correo, "Clave": clave,
+                "Perfil_Pantalla": slot_label, "PIN": pin,
+                "Estado": "Ocupado" if cliente else "Disponible",
+                "Fecha_Pago": fecha_pago_actual, "IP_Region": ip_region,
+                "Costo_Matriz": costo_inv
+            })
+
+            if cliente:
+                if fecha_corte:
+                    try:
+                        estado = "Activo" if pd.to_datetime(fecha_corte).date() >= date.today() else "Pendiente"
+                    except Exception:
+                        estado = "Pendiente"
+                else:
+                    estado = "Pendiente"
+                clientes.append({
+                    "Cliente": cliente, "Telefono": "", "Plataforma": plataforma,
+                    "Correo": correo, "Perfil_Pantalla": slot_label,
+                    "Fecha_Inicio": fecha_inicio, "Fecha_Corte": fecha_corte,
+                    "Metodo_Pago": "", "Monto": monto_cliente,
+                    "Clave_Spotify": clave if nombre_hoja == "SPOTIFY" else "",
+                    "Estado_Servicio": estado, "Fecha_Congelamiento": "",
+                    "Meses_Contratados": "1"
+                })
+
+        if filas_sin_correo:
+            avisos.append(f"{hoja}: {filas_sin_correo} fila(s) con datos de perfil/cliente se omitieron porque no tenían correo de cuenta identificable. Revísalas en el Excel antes de importarlas manualmente.")
+
+    df_inv = pd.DataFrame(inventario, columns=COLUMNAS_INV).fillna("").astype(str)
+    df_cli = pd.DataFrame(clientes, columns=COLUMNAS_CLI).fillna("").astype(str)
+    if not df_inv.empty:
+        df_inv = df_inv.drop_duplicates(subset=["Plataforma", "Correo", "Perfil_Pantalla"])
+    if not df_cli.empty:
+        df_cli = df_cli.drop_duplicates(subset=["Plataforma", "Correo", "Cliente", "Fecha_Inicio", "Fecha_Corte"])
+    return df_inv, df_cli, avisos
+
 def obtener_tasa_binance():
     url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
     headers = {"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"}
@@ -496,7 +664,7 @@ st.sidebar.markdown("""
 
 menu = st.sidebar.radio(
     "Menú Principal", 
-    ["📌 Panel Diario", "📦 Registrar Cuentas", "🛒 Vender Perfiles", "🗃️ Base de Datos", "💰 Finanzas", "🛠️ Soportes", "⚙️ Configuración"],
+    ["📌 Panel Diario", "📦 Registrar Cuentas", "🛒 Vender Perfiles", "📥 Importar Excel", "🗃️ Base de Datos", "💰 Finanzas", "🛠️ Soportes", "⚙️ Configuración"],
     key="nav_principal",
     label_visibility="collapsed"
 )
@@ -607,6 +775,33 @@ if menu == "📌 Panel Diario":
     if not pendientes_activacion.empty:
         st.markdown("---")
         st.subheader("⏳ Pendientes por Activar (En Pausa)")
+        st.warning(
+            f"Hay {len(pendientes_activacion)} servicio(s) pendientes. "
+            "La activación masiva pondrá la fecha de inicio en hoy y calculará "
+            "la fecha de corte según los meses contratados, igual que el botón individual."
+        )
+        confirmar_activar_todos = st.checkbox(
+            "Confirmo que quiero activar todos los servicios pendientes",
+            key="confirmar_activar_todos_pendientes"
+        )
+        if st.button(
+            f"✅ Activar los {len(pendientes_activacion)} servicios pendientes",
+            type="primary",
+            key="btn_activar_todos_pendientes",
+            disabled=not confirmar_activar_todos
+        ):
+            hoy_activar_todos = date.today()
+            for idx_pendiente, fila_pendiente in pendientes_activacion.iterrows():
+                meses_pendiente = int(to_float(fila_pendiente.get("Meses_Contratados", 1)))
+                if meses_pendiente < 1:
+                    meses_pendiente = 1
+                df_clientes_raw.at[idx_pendiente, "Fecha_Inicio"] = str(hoy_activar_todos)
+                df_clientes_raw.at[idx_pendiente, "Fecha_Corte"] = str(sumar_meses(hoy_activar_todos, meses_pendiente))
+                df_clientes_raw.at[idx_pendiente, "Estado_Servicio"] = "Activo"
+                df_clientes_raw.at[idx_pendiente, "Fecha_Congelamiento"] = ""
+            guardar_tabla("clientes", df_clientes_raw, COLUMNAS_CLI)
+            st.success(f"Se activaron {len(pendientes_activacion)} servicios. Revisa sus datos individualmente cuando quieras.")
+            st.rerun()
         for idx, row in pendientes_activacion.iterrows():
             st.warning(f"🟡 **CLIENTE: {row['Cliente']}** | Plataforma: {row['Plataforma']}")
             col_p1, col_p2, col_p3 = st.columns([2,2,1])
@@ -1048,9 +1243,64 @@ elif menu == "🛒 Vender Perfiles":
                         st.session_state.carrito = []
                         st.rerun()
 
-# ==============================================================================
+# ================================================================================
+# MÓDULO DE IMPORTACIÓN DESDE EXCEL
+# ================================================================================
+elif menu == "📥 Importar Excel":
+    st.header("📥 Importar registros desde Excel")
+    st.write("Carga el archivo .xlsx original. No necesitas convertirlo a CSV.")
+    st.warning("La importación es aditiva: no borra tablas ni reemplaza datos. Revisa la vista previa antes de guardar. No se crean pagos históricos ni se inventan costes de Spotify. Los perfiles extra de NETFLIX PE quedan pendientes de asignar a su matriz.")
+    archivo_excel = st.file_uploader("Selecciona tu Excel de plataformas", type=["xlsx"], key="subir_excel_registros")
+    if archivo_excel is not None:
+        try:
+            df_import_inv, df_import_cli, avisos_import = preparar_importacion_excel(archivo_excel)
+            # No continuar si no se puede leer Supabase: hacerlo podría causar duplicados.
+            try:
+                inv_actual = _leer_tabla_cache("inventario", COLUMNAS_INV)
+                cli_actual = _leer_tabla_cache("clientes", COLUMNAS_CLI)
+            except Exception as e_db:
+                st.error(f"No se pudo leer Supabase para comprobar duplicados. No se importó nada. Detalle: {e_db}")
+                st.stop()
+            if not inv_actual.empty:
+                claves_inv = set((inv_actual["Plataforma"].str.upper().str.strip() + "|" + inv_actual["Correo"].str.lower().str.strip() + "|" + inv_actual["Perfil_Pantalla"].str.lower().str.strip()).tolist())
+                df_import_inv = df_import_inv[~(df_import_inv["Plataforma"].str.upper().str.strip() + "|" + df_import_inv["Correo"].str.lower().str.strip() + "|" + df_import_inv["Perfil_Pantalla"].str.lower().str.strip()).isin(claves_inv)]
+            if not cli_actual.empty:
+                def clave_cliente(df):
+                    return (df["Plataforma"].str.upper().str.strip() + "|" + df["Correo"].str.lower().str.strip() + "|" + df["Cliente"].str.lower().str.strip() + "|" + df["Fecha_Inicio"].str.strip() + "|" + df["Fecha_Corte"].str.strip())
+                claves_cli = set(clave_cliente(cli_actual).tolist())
+                df_import_cli = df_import_cli[~clave_cliente(df_import_cli).isin(claves_cli)]
+            st.subheader("Resumen de la vista previa")
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Cuentas/perfiles nuevos", len(df_import_inv))
+            m2.metric("Clientes nuevos", len(df_import_cli))
+            m3.metric("Hojas leídas", len(pd.ExcelFile(archivo_excel).sheet_names))
+            if avisos_import:
+                for aviso in avisos_import:
+                    st.info(aviso)
+            with st.expander("Revisar inventario que se agregará", expanded=False):
+                st.dataframe(df_import_inv.drop(columns=["Clave"], errors="ignore"), use_container_width=True, hide_index=True)
+            with st.expander("Revisar clientes que se agregarán", expanded=True):
+                st.dataframe(df_import_cli.drop(columns=["Clave_Spotify"], errors="ignore"), use_container_width=True, hide_index=True)
+            st.caption("Por seguridad, las contraseñas no se muestran en las vistas previas. Fecha de inicio, fecha de corte y monto del cliente se leen de las columnas del Excel. El costo de Spotify queda en 0 hasta confirmar cómo repartir el costo familiar. Los perfiles extra quedan sin matriz asignada hasta revisarlos.")
+            confirmar_importacion = st.checkbox("Confirmo que revisé la vista previa y quiero agregar solo los registros nuevos.", key="confirmar_import_excel")
+            if st.button("🚀 Importar registros a Supabase", type="primary", disabled=not confirmar_importacion, key="btn_importar_excel_supabase"):
+                if len(df_import_inv) == 0 and len(df_import_cli) == 0:
+                    st.info("No hay registros nuevos para importar.")
+                else:
+                    ok_inv = True if df_import_inv.empty else agregar_filas("inventario", df_import_inv, COLUMNAS_INV)
+                    ok_cli = True if df_import_cli.empty else agregar_filas("clientes", df_import_cli, COLUMNAS_CLI)
+                    if ok_inv and ok_cli:
+                        st.success(f"Importación terminada. Se agregaron {len(df_import_inv)} registros de inventario y {len(df_import_cli)} clientes. No se eliminaron datos existentes.")
+                        st.cache_data.clear()
+                    else:
+                        st.error("La importación no terminó completamente. Revisa los errores mostrados y verifica en Supabase qué tabla recibió los datos antes de volver a intentar.")
+        except Exception as e:
+            st.error(f"No se pudo leer el Excel: {e}")
+            st.caption("Comprueba que sea un archivo .xlsx válido y que sus hojas sigan el formato del libro original.")
+
+# ================================================================================
 # MÓDULO 3: BASE DE DATOS
-# ==============================================================================
+# ================================================================================
 elif menu == "🗃️ Base de Datos":
     st.header("🗃️ Gestor de Bases de Datos")
     if "aviso_bd" in st.session_state:

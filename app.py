@@ -773,7 +773,7 @@ elif menu == "📦 Registrar Cuentas":
     st.subheader("Ingresar nueva cuenta al inventario")
     
     df_precios_act = leer_tabla("precios", COLUMNAS_PRE)
-    lista_plataformas = df_precios_act["Plataforma"].unique().tolist()
+    lista_plataformas = df_precios_act[~df_precios_act["Plataforma"].astype(str).str.endswith(" EXTRA")]["Plataforma"].unique().tolist()
     if not lista_plataformas:
         lista_plataformas = ["NETFLIX", "SPOTIFY"]
         
@@ -877,7 +877,8 @@ elif menu == "🛒 Vender Perfiles":
     df_pre = leer_tabla("precios", COLUMNAS_PRE)
     
     st.markdown("#### 📊 Pantallas Disponibles en Stock")
-    lp = df_pre["Plataforma"].unique().tolist()
+    # Las filas "PLATAFORMA EXTRA" son precios de catálogo, no plataformas físicas del inventario.
+    lp = df_inv_actual["Plataforma"].dropna().astype(str).unique().tolist()
     
     df_disp_tot = df_inv_actual[df_inv_actual["Estado"] == "Disponible"]
     
@@ -925,8 +926,12 @@ elif menu == "🛒 Vender Perfiles":
                 
                 m_in = st.number_input("Meses a contratar (Máx 12)", min_value=1, max_value=12, value=1, key=f"vta_meses_{str(i_sel)}")
                 
-                mt = df_pre[df_pre["Plataforma"] == plat_v]
-                p_base = to_float(mt.iloc[0]["Precio_Venta_Perfil"]) if not mt.empty else 0.0
+                es_extra_venta = str(d_p.get("IP_Region", "")).startswith("EXTRA de ")
+                producto_precio = f"{plat_v} EXTRA" if es_extra_venta else plat_v
+                mt = df_pre[df_pre["Plataforma"].astype(str).str.upper() == producto_precio.upper()]
+                p_base = to_float(mt.iloc[0]["Precio_Venta_Perfil"]) if not mt.empty else (4.0 if es_extra_venta else 0.0)
+                tipo_producto = "Perfil extra" if es_extra_venta else "Perfil normal"
+                st.caption(f"Producto: **{tipo_producto}**")
                 
                 p_mes = st.number_input("💰 Precio por Mes ($ - Editable)", min_value=0.0, value=float(p_base), step=0.5, key=f"vta_pmes_{str(i_sel)}")
                 
@@ -1305,13 +1310,27 @@ elif menu == "💰 Finanzas":
 
     st.markdown("### 📋 Catálogo de Venta al Público")
     df_pre = leer_tabla("precios", COLUMNAS_PRE)
-    
-    st.table(df_pre[["Plataforma", "Precio_Venta_Perfil"]])
+
+    # Cada plataforma tiene un producto extra independiente en el catálogo.
+    # Precio/costo inicial del extra: $4 venta / $3 costo; Finanzas permite editarlos.
+    plataformas_normales = df_pre[~df_pre["Plataforma"].astype(str).str.endswith(" EXTRA")]["Plataforma"].astype(str).tolist()
+    extras_faltantes = []
+    for plat_catalogo in plataformas_normales:
+        nombre_extra = f"{plat_catalogo} EXTRA"
+        if nombre_extra not in df_pre["Plataforma"].astype(str).values:
+            extras_faltantes.append({"Plataforma": nombre_extra, "Costo_Matriz": "3.00", "Precio_Venta_Perfil": "4.00"})
+    if extras_faltantes:
+        if agregar_filas("precios", pd.DataFrame(extras_faltantes), COLUMNAS_PRE):
+            df_pre = pd.concat([df_pre, pd.DataFrame(extras_faltantes)], ignore_index=True)
+
+    st.caption("Los productos terminados en EXTRA son precios independientes de venta; no representan cuentas ni plataformas adicionales en el inventario.")
+    st.table(df_pre[["Plataforma", "Costo_Matriz", "Precio_Venta_Perfil"]])
     
     with st.form("form_add_precio"):
-        st.markdown("#### ✏️ Agregar o Editar Plataforma")
+        st.markdown("#### ✏️ Agregar o Editar Precio de Producto")
+        st.caption("Para editar el precio de un extra, selecciona el nombre exacto del catálogo, por ejemplo NETFLIX EXTRA. El costo inicial es $3 y el precio de venta $4.")
         c_p1, c_p2 = st.columns(2)
-        p_nom = c_p1.text_input("Plataforma (Ej: NETFLIX)")
+        p_nom = c_p1.text_input("Producto (Ej: NETFLIX o NETFLIX EXTRA)")
         p_vent = c_p2.number_input("Precio de Venta Sugerido ($)", min_value=0.0, step=0.5)
         
         if st.form_submit_button("💾 Guardar Catálogo", type="primary"):

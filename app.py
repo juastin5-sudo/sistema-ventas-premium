@@ -304,6 +304,7 @@ def agregar_filas(tabla, df, columnas):
     return True
 
 def _texto_excel(v):
+    """Normaliza valores leídos de Excel sin mostrar nan/nat como texto."""
     if pd.isna(v):
         return ""
     if isinstance(v, (datetime, date, pd.Timestamp)):
@@ -311,94 +312,157 @@ def _texto_excel(v):
     texto = str(v).strip()
     return "" if texto.lower() in {"nan", "nat", "none"} else texto
 
+
 def _fecha_excel(v):
-    texto = _texto_excel(v)
-    if not texto:
+    """Convierte fechas de Excel (incluidos números seriales) a YYYY-MM-DD."""
+    if pd.isna(v) or str(v).strip() == "":
         return ""
     try:
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            # Fechas guardadas por Excel como número de serie.
+            if 20000 <= float(v) <= 80000:
+                return (pd.Timestamp("1899-12-30") + pd.to_timedelta(float(v), unit="D")).strftime("%Y-%m-%d")
         return pd.to_datetime(v, errors="raise").strftime("%Y-%m-%d")
     except Exception:
         return ""
 
+
+def _correo_excel(v):
+    """Limpia saltos de línea y texto adicional que algunas celdas tienen junto al correo."""
+    texto = _texto_excel(v)
+    if not texto:
+        return ""
+    lineas = [x.strip() for x in texto.splitlines() if x.strip()]
+    for linea in lineas:
+        if "@" in linea:
+            return linea
+    return lineas[0] if lineas else ""
+
+
 def preparar_importacion_excel(archivo):
-    """Convierte las hojas del libro histórico a inventario/clientes sin escribir en Supabase."""
+    """Lee el Excel y prepara inventario/clientes. No escribe nada en Supabase."""
+    # Índices de columna verificados contra los encabezados del libro compartido.
+    # La fila 4 de Excel contiene encabezados; los datos empiezan en la fila 5.
     mapas = {
-        "NETFLIX":     {"email": 6, "clave": 7, "slot": 8, "pin": 9, "cliente": 11, "inicio": 12, "corte": 14},
-        "NETFLIX PE":  {"email": 6, "clave": 7, "slot": 8, "pin": 9, "cliente": 11, "inicio": 12, "corte": 14},
-        "SPOTIFY":     {"email": 7, "clave": 8, "slot": 9, "pin": None, "cliente": 11, "inicio": 12, "corte": 14},
-        "DISNEY":      {"email": 5, "clave": 6, "slot": 7, "pin": 8, "cliente": 10, "inicio": 11, "corte": 13},
-        "HBO MAX":     {"email": 5, "clave": 6, "slot": 7, "pin": 8, "cliente": 11, "inicio": 12, "corte": 14},
-        "AMAZON":      {"email": 6, "clave": 7, "slot": 8, "pin": 9, "cliente": 11, "inicio": 12, "corte": 14},
-        "CRUNCHY":     {"email": 6, "clave": 7, "slot": 8, "pin": None, "cliente": 10, "inicio": 11, "corte": None},
-        "PARAMOUNT +": {"email": 6, "clave": 7, "slot": 8, "pin": None, "cliente": 10, "inicio": 11, "corte": None},
+        "NETFLIX":     {"email": 6, "clave": 7, "slot": 8, "pin": 9, "cliente": 11, "inicio": 12, "corte": 14, "fecha_pago": 3, "costo": 0, "monto": 17},
+        "NETFLIX PE":  {"email": 6, "clave": 7, "slot": 8, "pin": 9, "cliente": 11, "inicio": 12, "corte": 14, "fecha_pago": 3, "costo": 0, "monto": 17},
+        "SPOTIFY":     {"email": 7, "clave": 8, "slot": 9, "pin": None, "cliente": 11, "inicio": 12, "corte": 14, "fecha_pago": 3, "costo": 0, "monto": 17},
+        "DISNEY":      {"email": 5, "clave": 6, "slot": 7, "pin": 8, "cliente": 10, "inicio": 11, "corte": 13, "fecha_pago": 3, "costo": 0, "monto": 16},
+        "HBO MAX":     {"email": 5, "clave": 6, "slot": 7, "pin": 8, "cliente": 11, "inicio": 12, "corte": 14, "fecha_pago": 3, "costo": 0, "monto": 17},
+        "AMAZON":      {"email": 6, "clave": 7, "slot": 8, "pin": 9, "cliente": 11, "inicio": 12, "corte": 14, "fecha_pago": 3, "costo": 0, "monto": 17},
+        "CRUNCHY":     {"email": 6, "clave": 7, "slot": 8, "pin": None, "cliente": 10, "inicio": 11, "corte": 13, "fecha_pago": 3, "costo": 0, "monto": 16},
+        "PARAMOUNT +": {"email": 6, "clave": 7, "slot": 8, "pin": None, "cliente": 10, "inicio": 11, "corte": 13, "fecha_pago": 3, "costo": 0, "monto": 16},
     }
     inventario, clientes, avisos = [], [], []
-    libro = pd.ExcelFile(archivo)
+    contenido = archivo.getvalue() if hasattr(archivo, "getvalue") else archivo.read()
+    libro = pd.ExcelFile(io.BytesIO(contenido))
+
     for hoja in libro.sheet_names:
         nombre_hoja = str(hoja).strip().upper()
         mapa = mapas.get(nombre_hoja)
         if not mapa:
-            avisos.append(f"Hoja no reconocida: {hoja}")
+            avisos.append(f"Hoja no reconocida; no se importó: {hoja}")
             continue
-        df = pd.read_excel(archivo, sheet_name=hoja, header=None, dtype=object)
+        df = libro.parse(sheet_name=hoja, header=None, dtype=object)
         if df.shape[0] <= 4:
+            avisos.append(f"La hoja {hoja} no contiene filas de datos.")
             continue
-        # La fila 4 del Excel contiene encabezados; los registros empiezan en la fila 5.
+
         correo_actual, clave_actual = "", ""
-        cuenta_slots = {}
+        fecha_pago_actual, costo_actual = "", "0"
+        numero_perfil = {}
+        filas_sin_correo = 0
+
         for pos in range(4, len(df)):
             fila = df.iloc[pos]
+
             def celda(indice):
-                return _texto_excel(fila.iloc[indice]) if indice is not None and indice < len(fila) else ""
-            correo_fila = celda(mapa["email"])
-            clave_fila = celda(mapa["clave"])
-            # Solo actualizamos el contexto de matriz con credenciales explícitas de la fila.
-            if correo_fila:
+                return fila.iloc[indice] if indice is not None and indice < len(fila) else None
+
+            correo_fila = _correo_excel(celda(mapa["email"]))
+            clave_fila = _texto_excel(celda(mapa["clave"]))
+
+            # Al comenzar una cuenta nueva, no reutilizar por error la clave de la anterior.
+            if correo_fila and correo_fila.casefold() != correo_actual.casefold():
                 correo_actual = correo_fila
-            if clave_fila:
                 clave_actual = clave_fila
+                fecha_pago_actual = _fecha_excel(celda(mapa["fecha_pago"]))
+                costo_actual = _texto_excel(celda(mapa["costo"])) or "0"
+            else:
+                if clave_fila:
+                    clave_actual = clave_fila
+                fecha_pago_fila = _fecha_excel(celda(mapa["fecha_pago"]))
+                if fecha_pago_fila:
+                    fecha_pago_actual = fecha_pago_fila
+                costo_fila = _texto_excel(celda(mapa["costo"]))
+                if costo_fila:
+                    costo_actual = costo_fila
+
             correo = correo_actual
             clave = clave_actual
+            cliente = _texto_excel(celda(mapa["cliente"]))
+            fecha_inicio = _fecha_excel(celda(mapa["inicio"]))
+            fecha_corte = _fecha_excel(celda(mapa["corte"]))
+            monto_cliente = _texto_excel(celda(mapa["monto"])) or "0"
+            valor_slot = _texto_excel(celda(mapa["slot"]))
+            pin = _texto_excel(celda(mapa["pin"])) if mapa["pin"] is not None else "N/A"
+
+            if cliente.upper() in {"TOTAL", "TOTALES", "GANANCIA", "PRECIO DE CUENTA EN BS."}:
+                continue
+            # No importar filas de resumen ni inventar una cuenta cuando no se conoce el correo.
+            if not any([cliente, fecha_inicio, fecha_corte, valor_slot, pin if pin != "N/A" else ""]):
+                continue
             if not correo:
+                filas_sin_correo += 1
                 continue
-            # Saltar líneas de totales/resúmenes y filas sin ningún dato de perfil.
-            cliente = celda(mapa["cliente"])
-            fecha_inicio = _fecha_excel(fila.iloc[mapa["inicio"]]) if mapa["inicio"] is not None and mapa["inicio"] < len(fila) else ""
-            fecha_corte = _fecha_excel(fila.iloc[mapa["corte"]]) if mapa["corte"] is not None and mapa["corte"] < len(fila) else ""
-            valor_slot = celda(mapa["slot"])
-            pin = celda(mapa["pin"]) if mapa["pin"] is not None else "N/A"
-            if cliente.upper() in {"TOTAL", "TOTALES"}:
-                continue
-            if not any([cliente, fecha_inicio, fecha_corte, valor_slot, pin]):
-                continue
+
             key_cuenta = (nombre_hoja, correo.casefold())
-            if key_cuenta not in cuenta_slots:
-                cuenta_slots[key_cuenta] = 0
-            # Cada fila con datos de pantalla representa un cupo; el nombre del perfil es estable.
+            numero_perfil[key_cuenta] = numero_perfil.get(key_cuenta, 0) + 1
             if nombre_hoja == "SPOTIFY":
-                # En esta app cada cupo de Spotify se identifica por el correo propio del cliente.
+                # La app identifica los cupos Spotify por correo del cliente.
                 slot_label = correo
             elif valor_slot:
                 slot_label = valor_slot if valor_slot.lower().startswith(("perfil", "cupo", "principal")) else f"Perfil {valor_slot}"
             else:
-                cuenta_slots[key_cuenta] += 1
-                slot_label = f"Perfil {cuenta_slots[key_cuenta]}"
+                slot_label = f"Perfil {numero_perfil[key_cuenta]}"
+
+            plataforma = "CRUNCHY ROLL" if nombre_hoja == "CRUNCHY" else ("NETFLIX" if nombre_hoja == "NETFLIX PE" else nombre_hoja)
+            es_extra_pendiente = nombre_hoja == "NETFLIX PE"
+            # La relación con la matriz de los perfiles extra no se adivina.
+            ip_region = "EXTRA PENDIENTE DE ASIGNAR" if es_extra_pendiente else ""
+            # En Spotify la columna "Precio cuenta" no permite saber con seguridad el coste
+            # de cada invitación individual; se deja en cero para no inflar los gastos.
+            costo_inv = "0" if nombre_hoja == "SPOTIFY" else (costo_actual or "0")
+
             inventario.append({
-                "Plataforma": "NETFLIX" if nombre_hoja == "NETFLIX PE" else nombre_hoja,
-                "Correo": correo, "Clave": clave, "Perfil_Pantalla": slot_label,
-                "PIN": pin, "Estado": "Ocupado" if cliente else "Disponible", "Fecha_Pago": "",
-                "IP_Region": "", "Costo_Matriz": "0"
+                "Plataforma": plataforma, "Correo": correo, "Clave": clave,
+                "Perfil_Pantalla": slot_label, "PIN": pin,
+                "Estado": "Ocupado" if cliente else "Disponible",
+                "Fecha_Pago": fecha_pago_actual, "IP_Region": ip_region,
+                "Costo_Matriz": costo_inv
             })
+
             if cliente:
+                if fecha_corte:
+                    try:
+                        estado = "Activo" if pd.to_datetime(fecha_corte).date() >= date.today() else "Pendiente"
+                    except Exception:
+                        estado = "Pendiente"
+                else:
+                    estado = "Pendiente"
                 clientes.append({
-                    "Cliente": cliente, "Telefono": "",
-                    "Plataforma": "NETFLIX" if nombre_hoja == "NETFLIX PE" else nombre_hoja,
+                    "Cliente": cliente, "Telefono": "", "Plataforma": plataforma,
                     "Correo": correo, "Perfil_Pantalla": slot_label,
                     "Fecha_Inicio": fecha_inicio, "Fecha_Corte": fecha_corte,
-                    "Metodo_Pago": "", "Monto": "0", "Clave_Spotify": clave if nombre_hoja == "SPOTIFY" else "",
-                    "Estado_Servicio": "Pendiente" if not fecha_corte else ("Activo" if pd.to_datetime(fecha_corte).date() >= date.today() else "Pendiente"),
-                    "Fecha_Congelamiento": "", "Meses_Contratados": "1"
+                    "Metodo_Pago": "", "Monto": monto_cliente,
+                    "Clave_Spotify": clave if nombre_hoja == "SPOTIFY" else "",
+                    "Estado_Servicio": estado, "Fecha_Congelamiento": "",
+                    "Meses_Contratados": "1"
                 })
+
+        if filas_sin_correo:
+            avisos.append(f"{hoja}: {filas_sin_correo} fila(s) con datos de perfil/cliente se omitieron porque no tenían correo de cuenta identificable. Revísalas en el Excel antes de importarlas manualmente.")
+
     df_inv = pd.DataFrame(inventario, columns=COLUMNAS_INV).fillna("").astype(str)
     df_cli = pd.DataFrame(clientes, columns=COLUMNAS_CLI).fillna("").astype(str)
     if not df_inv.empty:
@@ -1158,13 +1222,18 @@ elif menu == "🛒 Vender Perfiles":
 elif menu == "📥 Importar Excel":
     st.header("📥 Importar registros desde Excel")
     st.write("Carga el archivo .xlsx original. No necesitas convertirlo a CSV.")
-    st.warning("La importación es aditiva: no borra tablas ni reemplaza datos. Revisa la vista previa antes de guardar. Los pagos históricos no se crean automáticamente porque el Excel no permite confirmar con seguridad qué cobros están registrados.")
-    archivo_excel = st.file_uploader("Selecciona tu Excel de plataformas", type=["xlsx", "xls"], key="subir_excel_registros")
+    st.warning("La importación es aditiva: no borra tablas ni reemplaza datos. Revisa la vista previa antes de guardar. No se crean pagos históricos ni se inventan costes de Spotify. Los perfiles extra de NETFLIX PE quedan pendientes de asignar a su matriz.")
+    archivo_excel = st.file_uploader("Selecciona tu Excel de plataformas", type=["xlsx"], key="subir_excel_registros")
     if archivo_excel is not None:
         try:
             df_import_inv, df_import_cli, avisos_import = preparar_importacion_excel(archivo_excel)
-            inv_actual = leer_tabla("inventario", COLUMNAS_INV)
-            cli_actual = leer_tabla("clientes", COLUMNAS_CLI)
+            # No continuar si no se puede leer Supabase: hacerlo podría causar duplicados.
+            try:
+                inv_actual = _leer_tabla_cache("inventario", COLUMNAS_INV)
+                cli_actual = _leer_tabla_cache("clientes", COLUMNAS_CLI)
+            except Exception as e_db:
+                st.error(f"No se pudo leer Supabase para comprobar duplicados. No se importó nada. Detalle: {e_db}")
+                st.stop()
             if not inv_actual.empty:
                 claves_inv = set((inv_actual["Plataforma"].str.upper().str.strip() + "|" + inv_actual["Correo"].str.lower().str.strip() + "|" + inv_actual["Perfil_Pantalla"].str.lower().str.strip()).tolist())
                 df_import_inv = df_import_inv[~(df_import_inv["Plataforma"].str.upper().str.strip() + "|" + df_import_inv["Correo"].str.lower().str.strip() + "|" + df_import_inv["Perfil_Pantalla"].str.lower().str.strip()).isin(claves_inv)]
@@ -1185,7 +1254,7 @@ elif menu == "📥 Importar Excel":
                 st.dataframe(df_import_inv.drop(columns=["Clave"], errors="ignore"), use_container_width=True, hide_index=True)
             with st.expander("Revisar clientes que se agregarán", expanded=True):
                 st.dataframe(df_import_cli.drop(columns=["Clave_Spotify"], errors="ignore"), use_container_width=True, hide_index=True)
-            st.caption("Por seguridad, las claves no se muestran en las vistas previas. Los perfiles extra cuya cuenta matriz no se pueda identificar no deben asignarse manualmente sin revisar el Excel.")
+            st.caption("Por seguridad, las contraseñas no se muestran en las vistas previas. Fecha de inicio, fecha de corte y monto del cliente se leen de las columnas del Excel. El costo de Spotify queda en 0 hasta confirmar cómo repartir el costo familiar. Los perfiles extra quedan sin matriz asignada hasta revisarlos.")
             confirmar_importacion = st.checkbox("Confirmo que revisé la vista previa y quiero agregar solo los registros nuevos.", key="confirmar_import_excel")
             if st.button("🚀 Importar registros a Supabase", type="primary", disabled=not confirmar_importacion, key="btn_importar_excel_supabase"):
                 if len(df_import_inv) == 0 and len(df_import_cli) == 0:

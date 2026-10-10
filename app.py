@@ -434,6 +434,22 @@ def pantallas_huerfanas(df_inv, df_cli):
         idxs.append(i)
     return pd.DataFrame(filas, index=idxs) if filas else pd.DataFrame()
 
+def es_paquete(nombre):
+    """True si el producto del catálogo es un paquete de meses, ej. 'AMAZON 3M'."""
+    partes = str(nombre).upper().strip().rsplit(" ", 1)
+    return len(partes) == 2 and partes[1].endswith("M") and partes[1][:-1].isdigit()
+
+def precio_producto(df_pre, producto):
+    """Precio del catálogo para un producto exacto (o None si no existe)."""
+    if df_pre is None or df_pre.empty:
+        return None
+    m = df_pre[df_pre["Plataforma"].astype(str).str.upper().str.strip() == str(producto).upper().strip()]
+    return to_float(m.iloc[0]["Precio_Venta_Perfil"]) if not m.empty else None
+
+def precio_paquete(df_pre, producto, meses):
+    """Precio total de un paquete de N meses (ej. 'AMAZON 3M'), o None si no hay paquete."""
+    return precio_producto(df_pre, f"{producto} {int(meses)}M")
+
 def es_spotify_con_correo_cliente(fila_cli):
     return fila_cli["Plataforma"] in PLAT_CORREO_CLIENTE and str(fila_cli["Perfil_Pantalla"]) == str(fila_cli["Correo"])
 
@@ -800,9 +816,21 @@ if menu == "📌 Panel Diario":
                                 c_r1, c_r2, c_r3 = st.columns([1, 2, 2])
                                 meses_ren = c_r1.number_input("Meses", min_value=1, max_value=12, value=1, key=f"mren_{cli}")
                                 sugerido = 0.0
+                                df_pre_cob = leer_tabla("precios", COLUMNAS_PRE)
                                 for i_s in checklines_seleccionados:
-                                    m_prev_s = max(int(to_float(df_clientes_raw.loc[i_s, "Meses_Contratados"])), 1)
-                                    sugerido += to_float(df_clientes_raw.loc[i_s, "Monto"]) / m_prev_s * meses_ren
+                                    f_s = df_clientes_raw.loc[i_s]
+                                    m_prev_s = max(int(to_float(f_s["Meses_Contratados"])), 1)
+                                    i_inv_s = buscar_fila_inv(df_inv_res, f_s)
+                                    es_ext_s = i_inv_s is not None and str(df_inv_res.loc[i_inv_s, "IP_Region"]).startswith("EXTRA de ")
+                                    prod_s = f"{f_s['Plataforma']} EXTRA" if es_ext_s else f_s["Plataforma"]
+                                    p_paq_s = precio_paquete(df_pre_cob, prod_s, meses_ren)
+                                    p_base_s = precio_producto(df_pre_cob, prod_s)
+                                    if p_paq_s is not None:
+                                        sugerido += p_paq_s
+                                    elif m_prev_s > 1 and p_base_s:
+                                        sugerido += p_base_s * meses_ren
+                                    else:
+                                        sugerido += to_float(f_s["Monto"]) / m_prev_s * meses_ren
                                 sugerido = round(sugerido, 2)
                                 opc = c_r2.selectbox("Acción:", ["---", "✅ Sí Renovó (Extender)", "❌ No Renovó (Cortar)"], key=f"acc_{cli}")
                                 monto_recibido = c_r3.number_input("Monto recibido ($)", min_value=0.0, step=0.5, value=float(sugerido), key=f"mrec_{cli}_{meses_ren}_{sugerido}")
@@ -900,7 +928,7 @@ elif menu == "📦 Registrar Cuentas":
     st.subheader("Ingresar nueva cuenta al inventario")
     
     df_precios_act = leer_tabla("precios", COLUMNAS_PRE)
-    lista_plataformas = df_precios_act[~df_precios_act["Plataforma"].astype(str).str.endswith(" EXTRA")]["Plataforma"].unique().tolist()
+    lista_plataformas = [p for p in df_precios_act["Plataforma"].astype(str).unique().tolist() if not p.endswith(" EXTRA") and not es_paquete(p)]
     if not lista_plataformas:
         lista_plataformas = ["NETFLIX", "SPOTIFY"]
         
@@ -1074,6 +1102,10 @@ elif menu == "🛒 Vender Perfiles":
                 p_mes = st.number_input("💰 Precio por Mes ($ - Editable)", min_value=0.0, value=float(p_base), step=0.5, key=f"vta_pmes_{str(i_sel)}")
                 
                 sug_total = p_mes * m_in
+                p_paq = precio_paquete(df_pre, producto_precio, m_in)
+                if p_paq is not None and abs(p_mes - p_base) < 0.001:
+                    sug_total = p_paq
+                    st.caption(f"📦 Paquete de {m_in} mes(es): precio fijo ${p_paq:.2f}")
                 st.markdown(f"**Total Sugerido: ${sug_total:.2f}**")
                 
                 usar_desc = st.checkbox("💸 Aplicar Precio Personalizado / Descuento al total", key=f"vta_chk_desc_{str(i_sel)}")
@@ -1770,6 +1802,8 @@ elif menu == "💰 Finanzas":
     datos_finanzas = []
     
     for plat in df_pre["Plataforma"].unique():
+        if es_paquete(plat):
+            continue
         ing_plat = float(df_mes[df_mes["Plataforma"] == plat]["Monto_f"].sum())
         
         if not df_inv.empty:

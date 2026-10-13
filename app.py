@@ -1966,7 +1966,7 @@ elif menu == "🛠️ Soportes":
                                 st.rerun()
 
                     elif tipo_rep == "📩 Perdió sus datos de acceso (reenviar)":
-                        todos_dat = st.checkbox("Incluir todos los servicios de este cliente en un solo mensaje", value=False, key=f"rep_dat_todos_{idx_rep}")
+                        todos_dat = st.checkbox("Enviar los datos de TODOS los servicios de este cliente en un solo mensaje (desmárcalo para enviar solo el servicio elegido)", value=True, key=f"rep_dat_todos_{idx_rep}")
                         filas_dat = df_f_rep.index.tolist() if todos_dat else [idx_rep]
                         partes_dat, faltan_dat = [], []
                         for i_dat in filas_dat:

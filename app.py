@@ -1968,14 +1968,25 @@ elif menu == "🛠️ Soportes":
                     elif tipo_rep == "📩 Perdió sus datos de acceso (reenviar)":
                         todos_dat = st.checkbox("Enviar los datos de TODOS los servicios de este cliente en un solo mensaje (desmárcalo para enviar solo el servicio elegido)", value=True, key=f"rep_dat_todos_{idx_rep}")
                         filas_dat = df_f_rep.index.tolist() if todos_dat else [idx_rep]
-                        partes_dat, faltan_dat = [], []
+                        partes_dat, faltan_dat, fechas_dat = [], [], []
+                        plantilla_dat = cargar_plantilla("venta")
                         for i_dat in filas_dat:
                             r_dat = df_cli_rep.loc[i_dat]
                             acc = datos_acceso_servicio(df_inv_rep, r_dat)
                             if acc is None:
                                 faltan_dat.append(f"{r_dat['Plataforma']} ({r_dat['Perfil_Pantalla']})")
                             else:
-                                partes_dat.append(armar_mensaje_datos(acc[0], acc[1], acc[2], acc[3], acc[4], r_dat["Fecha_Corte"]).split("\n\n", 1)[1])
+                                try:
+                                    f_txt = pd.to_datetime(r_dat["Fecha_Corte"]).strftime('%d/%m/%Y')
+                                except Exception:
+                                    f_txt = str(r_dat["Fecha_Corte"])
+                                fechas_dat.append(f_txt)
+                                partes_dat.append(plantilla_dat.replace("[plataforma]", str(acc[0])).replace("[correo]", str(acc[1])).replace("[clave]", str(acc[2])).replace("[perfil]", str(acc[3])).replace("[pin]", str(acc[4])).replace("[fecha_corte]", f_txt).strip())
+                        # Si todos los servicios vencen el mismo día, la fecha se escribe una sola vez al final.
+                        if len(partes_dat) > 1 and len(set(fechas_dat)) == 1:
+                            f_unica = fechas_dat[0]
+                            partes_dat = ["\n".join(ln for ln in p.split("\n") if f_unica not in ln).strip() for p in partes_dat]
+                            partes_dat.append(f"*Vence el*: {f_unica} (todos tus servicios)")
                         if faltan_dat:
                             st.warning("No encontré en el inventario: " + ", ".join(faltan_dat) + ". Revísalo en Base de Datos > Inventario.")
                         if partes_dat:

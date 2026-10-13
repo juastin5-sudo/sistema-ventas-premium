@@ -939,8 +939,10 @@ if menu == "📌 Panel Diario":
                         c_mat, c_extra, n_extra = costo_con_extras(df_inv, row["Plataforma"], row["Correo"], row.get("Costo_Matriz", 0.0))
                         txt_extra = f" (incluye ${c_extra:.2f} de {n_extra} extra)" if c_extra > 0 else ""
                         with tarjeta():
-                            reg_m = str(row.get("IP_Region", "")).strip()
-                            st.markdown(f"**{row['Plataforma']}**" + (f" · 🌎 **{reg_m}**" if reg_m else "") + f" · {est}")
+                            regs_cta = df_inv[(df_inv["Plataforma"] == row["Plataforma"]) & (df_inv["Correo"] == row["Correo"])]["IP_Region"].astype(str).str.strip()
+                            regs_cta = [r_ for r_ in regs_cta if r_ and not r_.upper().startswith("EXTRA")]
+                            reg_m = regs_cta[0] if regs_cta else ""
+                            st.markdown(f"**{row['Plataforma']}** · " + (f"🌎 **{reg_m}**" if reg_m else "🌎 _sin región (anótala en Finanzas)_") + f" · {est}")
                             st.caption(f"{row['Correo']}  \n💸 ${c_mat:.2f}{txt_extra} · {c_mat * st.session_state.tasa_cambio:,.2f} Bs")
                             base_pago = max(row["Fecha_Real"].date(), date.today())
                             nueva_31 = base_pago + timedelta(days=DIAS_CICLO_MATRIZ)

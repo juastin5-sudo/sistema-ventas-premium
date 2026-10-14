@@ -190,7 +190,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==============================================================================
-# CAMBIO: CONTRASEÑA DE ACCESO (si no hay APP_PASSWORD en los secrets, no pide nada)
+# CONTRASEÑA DE ACCESO (si no hay APP_PASSWORD en los secrets, no pide nada)
 # ==============================================================================
 def verificar_acceso():
     clave_app = st.secrets.get("APP_PASSWORD", "")
@@ -212,11 +212,9 @@ def verificar_acceso():
 verificar_acceso()
 
 # ==============================================================================
-# 2. SISTEMA DE BASE DE DATOS ULTRA-LIGERO
+# 2. SISTEMA DE BASE DE DATOS ULTRA-LIGERO (CORREGIDO Y SINCRONIZADO)
 # ==============================================================================
 COLUMNAS_INV = ["Plataforma", "Correo", "Clave", "Perfil_Pantalla", "PIN", "Estado", "Fecha_Pago", "IP_Region", "Costo_Matriz"]
-# Servicios donde el cliente usa SU PROPIO correo (lo invitas a un plan/equipo):
-# al cortarlos NO hay que cambiar ninguna clave, solo sacarlo del plan.
 PLAT_CORREO_CLIENTE = ("SPOTIFY", "CANVA")
 
 COLUMNAS_CLI = ["Cliente", "Telefono", "Plataforma", "Correo", "Perfil_Pantalla", "Fecha_Inicio", "Fecha_Corte", "Metodo_Pago", "Monto", "Clave_Spotify", "Estado_Servicio", "Fecha_Congelamiento", "Meses_Contratados"]
@@ -249,11 +247,11 @@ def to_float(val):
     except:
         return 0.0
 
-# CAMBIO: lectura con caché de 60 segundos. Si falla la conexión, NO se guarda en caché.
-@st.cache_data(ttl=60, show_spinner=False)
+# Caché reducido a 5 segundos y limpieza de espacios invisibles al leer
+@st.cache_data(ttl=5, show_spinner=False)
 def _leer_tabla_cache(tabla, columnas):
     url = f"{st.secrets['SUPABASE_URL']}/rest/v1/{tabla}?select=*"
-    res = requests.get(url, headers=get_headers_get(), timeout=10)
+    res = requests.get(url, headers=get_headers_get(), timeout=15)
     if res.status_code != 200:
         raise Exception("Error leyendo tabla")
     df = pd.DataFrame(res.json())
@@ -262,49 +260,62 @@ def _leer_tabla_cache(tabla, columnas):
     for col in columnas:
         if col not in df.columns:
             df[col] = ""
-    return df[columnas].astype(str).fillna("")
+    df_clean = df[columnas].astype(str).fillna("")
+    for col in ["Plataforma", "Correo", "Perfil_Pantalla", "Estado", "Cliente"]:
+        if col in df_clean.columns:
+            df_clean[col] = df_clean[col].str.strip()
+    return df_clean
 
 def leer_tabla(tabla, columnas):
     try:
-        return _leer_tabla_cache(tabla, columnas)
-    except:
-        pass
-    return pd.DataFrame(columns=columnas).astype(str)
+        return _leer_tabla_cache(tabla, columnas).copy()
+    except Exception:
+        st.error(f"⚠️ Error al leer la tabla '{tabla}' de la nube. Revisa tu conexión a internet.")
+        return pd.DataFrame(columns=columnas).astype(str)
 
 def guardar_tabla(tabla, df, columnas):
+    st.cache_data.clear()
     try:
+        df_clean = df[columnas].fillna("").astype(str).copy()
+        for col in ["Plataforma", "Correo", "Perfil_Pantalla", "Estado", "Cliente"]:
+            if col in df_clean.columns:
+                df_clean[col] = df_clean[col].str.strip()
+
         url_del = f"{st.secrets['SUPABASE_URL']}/rest/v1/{tabla}?{columnas[0]}=not.eq.VALOR_INEXISTENTE"
-        r_del = requests.delete(url_del, headers=get_headers(), timeout=10)
+        r_del = requests.delete(url_del, headers=get_headers(), timeout=20)
         if r_del.status_code >= 300:
             st.error(f"Error al borrar en {tabla}: {r_del.status_code} - {r_del.text}")
-            st.cache_data.clear()
-            return
+            return False
 
-        if not df.empty:
-            df_clean = df[columnas].fillna("").astype(str)
+        if not df_clean.empty:
             records = df_clean.to_dict(orient="records")
             url_ins = f"{st.secrets['SUPABASE_URL']}/rest/v1/{tabla}"
-            r_ins = requests.post(url_ins, headers=get_headers(), json=records, timeout=10)
+            r_ins = requests.post(url_ins, headers=get_headers(), json=records, timeout=20)
             if r_ins.status_code >= 300:
                 st.error(f"Error al guardar en {tabla}: {r_ins.status_code} - {r_ins.text}")
+                return False
     except Exception as e:
-        st.error(f"Error de conexión: {e}")
+        st.error(f"Error de conexión al guardar {tabla}: {e}")
+        return False
     st.cache_data.clear()
+    return True
 
 def agregar_filas(tabla, df, columnas):
+    st.cache_data.clear()
     try:
         if not df.empty:
-            df_clean = df[columnas].fillna("").astype(str)
+            df_clean = df[columnas].fillna("").astype(str).copy()
+            for col in ["Plataforma", "Correo", "Perfil_Pantalla", "Estado", "Cliente"]:
+                if col in df_clean.columns:
+                    df_clean[col] = df_clean[col].str.strip()
             records = df_clean.to_dict(orient="records")
             url_ins = f"{st.secrets['SUPABASE_URL']}/rest/v1/{tabla}"
-            r = requests.post(url_ins, headers=get_headers(), json=records, timeout=10)
+            r = requests.post(url_ins, headers=get_headers(), json=records, timeout=15)
             if r.status_code >= 300:
                 st.error(f"Error al guardar en {tabla}: {r.status_code} - {r.text}")
-                st.cache_data.clear()
                 return False
     except Exception as e:
         st.error(f"Error insertando: {e}")
-        st.cache_data.clear()
         return False
     st.cache_data.clear()
     return True
@@ -320,15 +331,15 @@ def obtener_tasa_binance():
             anuncios = res_json.get("data", [])
             if len(anuncios) >= 4:
                 return round(float(anuncios[3]["adv"]["price"]) * 1.01, 2)
-    except: pass
+    except:
+        pass
     return None
 
-# CAMBIO: la tasa de Binance se comparte entre todas las sesiones por 30 minutos
 @st.cache_data(ttl=1800, show_spinner=False)
 def tasa_binance_cache():
     t = obtener_tasa_binance()
     if t is None:
-        raise Exception("Sin tasa")  # así un fallo no se guarda en caché
+        raise Exception("Sin tasa")
     return t
 
 def sumar_meses(fecha_obj, meses):
@@ -347,7 +358,6 @@ def registrar_pagos(lista):
         st.session_state.error_pagos = "⚠️ La venta se guardó, pero NO se pudo anotar en el historial de pagos. Revisa que la tabla 'pagos' exista en Supabase."
     return ok
 
-# CAMBIO: ciclo de pago de las matrices y días de aviso
 DIAS_CICLO_MATRIZ = 31
 DIAS_AVISO_MATRIZ = 3
 
@@ -399,11 +409,21 @@ def etiqueta_cobro(r):
     return f"{ic} {r['cli']} · {r['n']} serv. · ${r['total']:.2f} · {cuando}"
 
 def buscar_fila_inv(df_inv, fila_cli):
-    """Índice de la pantalla del inventario que usa un servicio de cliente (o None)."""
-    if fila_cli["Plataforma"] in PLAT_CORREO_CLIENTE:
-        m = df_inv[(df_inv["Plataforma"] == fila_cli["Plataforma"]) & (df_inv["Perfil_Pantalla"] == fila_cli["Perfil_Pantalla"])]
+    """Índice de la pantalla del inventario que usa un servicio de cliente (o None), ignorando mayúsculas y espacios."""
+    if df_inv.empty:
+        return None
+    plat_c = str(fila_cli["Plataforma"]).strip().upper()
+    perf_c = str(fila_cli["Perfil_Pantalla"]).strip().upper()
+    corr_c = str(fila_cli["Correo"]).strip().lower()
+
+    m_plat = df_inv["Plataforma"].astype(str).str.strip().str.upper() == plat_c
+    m_perf = df_inv["Perfil_Pantalla"].astype(str).str.strip().str.upper() == perf_c
+    m_corr = df_inv["Correo"].astype(str).str.strip().str.lower() == corr_c
+
+    if plat_c in PLAT_CORREO_CLIENTE:
+        m = df_inv[m_plat & m_perf]
     else:
-        m = df_inv[(df_inv["Plataforma"] == fila_cli["Plataforma"]) & (df_inv["Correo"] == fila_cli["Correo"]) & (df_inv["Perfil_Pantalla"] == fila_cli["Perfil_Pantalla"])]
+        m = df_inv[m_plat & m_corr & m_perf]
     return m.index[0] if not m.empty else None
 
 def matriz_de_servicio(df_inv, fila_cli):
@@ -434,7 +454,23 @@ def pantallas_huerfanas(df_inv, df_cli):
         idxs.append(i)
     return pd.DataFrame(filas, index=idxs) if filas else pd.DataFrame()
 
-# Los fragmentos hacen que, al tocar algo en el Panel Diario, solo se refresque esa parte y no toda la página.
+def pantallas_mal_disponibles(df_inv, df_cli):
+    """Pantallas que aparecen Disponibles pero ya las tiene un cliente activo."""
+    filas, idxs = [], []
+    for _, r in df_cli.iterrows():
+        i = buscar_fila_inv(df_inv, r)
+        if i is not None and df_inv.loc[i, "Estado"] == "Disponible":
+            if i not in idxs:
+                filas.append({
+                    "Cliente": r["Cliente"],
+                    "Plataforma": df_inv.loc[i, "Plataforma"],
+                    "Correo": df_inv.loc[i, "Correo"],
+                    "Perfil_Pantalla": df_inv.loc[i, "Perfil_Pantalla"],
+                    "Estado Actual": "Disponible (Debería estar Ocupado)"
+                })
+                idxs.append(i)
+    return pd.DataFrame(filas, index=idxs) if filas else pd.DataFrame()
+
 fragmento = st.fragment if hasattr(st, "fragment") else (lambda f: f)
 
 def costo_catalogo(df_pre, producto):
@@ -461,7 +497,7 @@ def precio_paquete(df_pre, producto, meses):
     return precio_producto(df_pre, f"{producto} {int(meses)}M")
 
 def es_spotify_con_correo_cliente(fila_cli):
-    return fila_cli["Plataforma"] in PLAT_CORREO_CLIENTE and str(fila_cli["Perfil_Pantalla"]) == str(fila_cli["Correo"])
+    return str(fila_cli["Plataforma"]).strip().upper() in PLAT_CORREO_CLIENTE and str(fila_cli["Perfil_Pantalla"]).strip().lower() == str(fila_cli["Correo"]).strip().lower()
 
 def liberar_al_cortar(df_inv, i_inv, fila_cli):
     """Corta un servicio en el inventario. Devuelve 'revision' (hay que cambiar PIN/clave)
@@ -484,20 +520,20 @@ def reasignar_servicio(df_c, df_inv, idx_c, nuevo_i, correo_cli, ant_revision):
             df_inv.at[i_old, "Perfil_Pantalla"] = "Cupo libre"
     df_inv.at[nuevo_i, "Estado"] = "Ocupado"
     if spot_cli:
-        corr = str(correo_cli).strip() or str(fila["Correo"])
+        corr = str(correo_cli).strip() or str(fila["Correo"]).strip()
         df_inv.at[nuevo_i, "Perfil_Pantalla"] = corr
         df_c.at[idx_c, "Correo"] = corr
         df_c.at[idx_c, "Perfil_Pantalla"] = corr
     else:
-        df_c.at[idx_c, "Correo"] = df_inv.at[nuevo_i, "Correo"]
-        df_c.at[idx_c, "Perfil_Pantalla"] = df_inv.at[nuevo_i, "Perfil_Pantalla"]
+        df_c.at[idx_c, "Correo"] = str(df_inv.at[nuevo_i, "Correo"]).strip()
+        df_c.at[idx_c, "Perfil_Pantalla"] = str(df_inv.at[nuevo_i, "Perfil_Pantalla"]).strip()
     return df_c, df_inv
 
 def cambiar_correo_spotify(df_c, df_inv, idx_c, nuevo_correo):
     """Cambia el correo del cliente de Spotify y el nombre de su cupo en el inventario."""
     fila = df_c.loc[idx_c]
     nuevo = str(nuevo_correo).strip()
-    if not es_spotify_con_correo_cliente(fila) or not nuevo or nuevo == str(fila["Correo"]):
+    if not es_spotify_con_correo_cliente(fila) or not nuevo or nuevo == str(fila["Correo"]).strip():
         return df_c, df_inv
     i_old = buscar_fila_inv(df_inv, fila)
     if i_old is not None:
@@ -523,7 +559,7 @@ ahora = datetime.now()
 if (ahora - st.session_state.ultima_actualizacion) > timedelta(minutes=30):
     st.session_state.ultima_actualizacion = ahora
     try:
-        tasa_nueva = tasa_binance_cache()  # CAMBIO: usa la versión con caché
+        tasa_nueva = tasa_binance_cache()
     except:
         tasa_nueva = None
     if tasa_nueva:
@@ -619,8 +655,6 @@ if menu == "📌 Panel Diario":
     hoy_pd = pd.to_datetime("today").normalize()
     
     df_clientes_raw = leer_tabla("clientes", COLUMNAS_CLI)
-
-    # CAMBIO: tarjetas de resumen arriba
     df_inv_res = leer_tabla("inventario", COLUMNAS_INV)
     act_res = df_clientes_raw[df_clientes_raw["Estado_Servicio"] == "Activo"].copy()
     if act_res.empty:
@@ -695,7 +729,7 @@ if menu == "📌 Panel Diario":
                         nuevo_pin_r = cr3.text_input("Nuevo PIN", value=str(row_r["PIN"]), key=f"rp_{idx_r}", label_visibility="collapsed", placeholder="Nuevo PIN")
                         if cr4.button("✅ Reactivar", key=f"rb_{idx_r}", type="primary", use_container_width=True):
                             df_inv_res.at[idx_r, "Estado"] = "Disponible"
-                            df_inv_res.at[idx_r, "PIN"] = str(nuevo_pin_r)
+                            df_inv_res.at[idx_r, "PIN"] = str(nuevo_pin_r).strip()
                             guardar_tabla("inventario", df_inv_res, COLUMNAS_INV)
                             st.rerun()
         _bloque_limpieza()
@@ -720,7 +754,7 @@ if menu == "📌 Panel Diario":
 
     col_cobros, col_pagos = st.columns([3, 2])
 
-    # ---------------------------------------------------------------- COBROS (un cliente a la vez)
+    # ---------------------------------------------------------------- COBROS
     with col_cobros:
         @fragmento
         def _bloque_cobros():
@@ -873,11 +907,14 @@ if menu == "📌 Panel Diario":
                                         elif not checklines_seleccionados:
                                             st.error("⚠️ Marca pantalla.")
                                         else:
-                                            df_full_cli = df_clientes_raw.copy()
+                                            st.cache_data.clear()
+                                            df_full_cli = leer_tabla("clientes", COLUMNAS_CLI)
                                             df_full_inv = leer_tabla("inventario", COLUMNAS_INV)
                                             if "Sí Renovó" in opc:
                                                 pagos_ren = []
                                                 for idx_row in checklines_seleccionados:
+                                                    if idx_row not in df_full_cli.index:
+                                                        continue
                                                     f_vieja = datetime.strptime(df_full_cli.loc[idx_row, "Fecha_Corte"], "%Y-%m-%d").date()
                                                     meses_prev = max(int(to_float(df_full_cli.loc[idx_row, "Meses_Contratados"])), 1)
                                                     monto_prev = to_float(df_full_cli.loc[idx_row, "Monto"])
@@ -902,6 +939,8 @@ if menu == "📌 Panel Diario":
                                                 n_rev_corte = 0
                                                 sacar_del_plan = []
                                                 for idx_row in checklines_seleccionados:
+                                                    if idx_row not in df_full_cli.index:
+                                                        continue
                                                     r_d = df_full_cli.loc[idx_row]
                                                     i_inv_nr = buscar_fila_inv(df_full_inv, r_d)
                                                     if i_inv_nr is not None:
@@ -977,7 +1016,6 @@ elif menu == "📦 Registrar Cuentas":
     with col1:
         plataforma = st.selectbox("Plataforma (Se añaden desde Finanzas)", lista_plataformas, key="reg_plat")
         
-        # CAMBIO: perfil extra (con correo propio, pero se paga junto a otra matriz)
         es_extra = st.checkbox("➕ Es un perfil extra (se paga junto a otra cuenta matriz)", key="reg_extra")
         if es_extra:
             df_inv_reg = leer_tabla("inventario", COLUMNAS_INV)
@@ -1049,9 +1087,9 @@ elif menu == "📦 Registrar Cuentas":
             n_perf = []
             for item in perfiles_a_guardar:
                 n_perf.append({
-                    "Plataforma": plataforma, "Correo": correo, "Clave": clave, 
-                    "Perfil_Pantalla": item["nombre"], "PIN": str(item["pin"]), 
-                    "Estado": "Disponible", "Fecha_Pago": str(fecha_pago_cuenta), "IP_Region": ip_region,
+                    "Plataforma": plataforma.strip(), "Correo": correo.strip(), "Clave": clave.strip(), 
+                    "Perfil_Pantalla": str(item["nombre"]).strip(), "PIN": str(item["pin"]).strip(), 
+                    "Estado": "Disponible", "Fecha_Pago": str(fecha_pago_cuenta), "IP_Region": ip_region.strip(),
                     "Costo_Matriz": str(costo_matriz_input)
                 })
             ok = agregar_filas("inventario", pd.DataFrame(n_perf), COLUMNAS_INV)
@@ -1079,7 +1117,6 @@ elif menu == "🛒 Vender Perfiles":
     df_pre = leer_tabla("precios", COLUMNAS_PRE)
     
     st.markdown("#### 📊 Pantallas Disponibles en Stock")
-    # Las filas "PLATAFORMA EXTRA" son precios de catálogo, no plataformas físicas del inventario.
     lp = df_inv_actual["Plataforma"].dropna().astype(str).unique().tolist()
     
     df_disp_tot = df_inv_actual[df_inv_actual["Estado"] == "Disponible"]
@@ -1121,7 +1158,7 @@ elif menu == "🛒 Vender Perfiles":
                         cl_cli_in = st.text_input("🔑 Contraseña del Cliente", type="password", key=f"vta_pass_spot_{str(i_sel)}")
                     else:
                         cl_cli_in = ""
-                    n_fin = c_cli_in if c_cli_in.strip() else str(d_p["Perfil_Pantalla"])
+                    n_fin = c_cli_in.strip() if c_cli_in.strip() else str(d_p["Perfil_Pantalla"]).strip()
                     pin_asig = "N/A"
                 else:
                     n_fin = st.text_input("Nombre en pantalla", value=str(d_p["Perfil_Pantalla"]), key=f"vta_nom_gen_{str(i_sel)}")
@@ -1154,9 +1191,10 @@ elif menu == "🛒 Vender Perfiles":
                     p_final = sug_total
                 
             item_nuevo = {
-                "index_original": i_sel, "Plataforma": plat_v, "Correo_Matriz": str(d_p["Correo"]), 
-                "Clave_Matriz": str(d_p["Clave"]), "Perfil_Pantalla": n_fin, "PIN": pin_asig, 
-                "Meses": m_in, "Precio_Calculado": p_final, "Correo_Cliente": c_cli_in, "Clave_Cliente": cl_cli_in
+                "index_original": i_sel, "Plataforma": str(plat_v).strip(), "Correo_Matriz": str(d_p["Correo"]).strip(), 
+                "Clave_Matriz": str(d_p["Clave"]).strip(), "Perfil_Original": str(d_p["Perfil_Pantalla"]).strip(),
+                "Perfil_Pantalla": str(n_fin).strip(), "PIN": str(pin_asig).strip(), 
+                "Meses": m_in, "Precio_Calculado": p_final, "Correo_Cliente": str(c_cli_in).strip(), "Clave_Cliente": str(cl_cli_in).strip()
             }
             cb_a, cb_b = st.columns(2)
             if cb_a.button("➕ Añadir al Combo", type="secondary", key=f"btn_add_{str(i_sel)}"):
@@ -1212,8 +1250,11 @@ elif menu == "🛒 Vender Perfiles":
                 
                 if b_conf:
                     if not cli.strip():
-                        st.error("⚠️ Faltan datos.")
+                        st.error("⚠️ Faltan datos del cliente.")
                     else:
+                        st.cache_data.clear()
+                        df_inv_fresco = leer_tabla("inventario", COLUMNAS_INV)
+                        
                         m_div = round(m_tot / len(st.session_state.carrito), 2)
                         m_uni = ""
                         f_nuevas = []
@@ -1231,36 +1272,55 @@ elif menu == "🛒 Vender Perfiles":
                                 f_c = sumar_meses(f_base, i["Meses"])
                                 f_ini = f_base
                                 tipo_pago = "Venta"
+                                
+                            correo_guardar = i["Correo_Cliente"].strip() if i["Correo_Cliente"].strip() else i["Correo_Matriz"].strip()
+                            perfil_guardar = i["Perfil_Pantalla"].strip()
+
                             f_nuevas.append({
-                                "Cliente": cli, "Telefono": tel, "Plataforma": i["Plataforma"], 
-                                "Correo": i["Correo_Matriz"] if not i["Correo_Cliente"] else i["Correo_Cliente"], 
-                                "Perfil_Pantalla": i["Perfil_Pantalla"], "Fecha_Inicio": str(f_ini), "Fecha_Corte": str(f_c), 
+                                "Cliente": cli.strip(), "Telefono": tel.strip(), "Plataforma": i["Plataforma"].strip(), 
+                                "Correo": correo_guardar, 
+                                "Perfil_Pantalla": perfil_guardar, "Fecha_Inicio": str(f_ini), "Fecha_Corte": str(f_c), 
                                 "Metodo_Pago": met, "Monto": str(m_div), "Clave_Spotify": i["Clave_Cliente"], 
                                 "Estado_Servicio": e_ini, "Fecha_Congelamiento": "", "Meses_Contratados": str(i["Meses"])
                             })
                             
                             p_nuevos.append({
-                                "Fecha": str(f_ini), "Cliente": cli, "Plataforma": i["Plataforma"],
-                                "Correo": i["Correo_Matriz"] if not i["Correo_Cliente"] else i["Correo_Cliente"],
-                                "Perfil_Pantalla": i["Perfil_Pantalla"], "Monto": str(m_div),
+                                "Fecha": str(f_ini), "Cliente": cli.strip(), "Plataforma": i["Plataforma"].strip(),
+                                "Correo": correo_guardar,
+                                "Perfil_Pantalla": perfil_guardar, "Monto": str(m_div),
                                 "Metodo_Pago": met, "Meses": str(i["Meses"]), "Tipo": tipo_pago
                             })
                             
+                            # Búsqueda segura de la pantalla en el inventario fresco
                             idx = i["index_original"]
-                            df_inv_actual.at[idx, "Estado"] = "Ocupado"
-                            df_inv_actual.at[idx, "PIN"] = i["PIN"]
-                            df_inv_actual.at[idx, "Perfil_Pantalla"] = i["Perfil_Pantalla"]
+                            perf_orig = i.get("Perfil_Original", perfil_guardar)
+                            m_exacta = df_inv_fresco[
+                                (df_inv_fresco["Plataforma"].str.upper() == i["Plataforma"].strip().upper()) &
+                                (df_inv_fresco["Correo"].str.lower() == i["Correo_Matriz"].strip().lower()) &
+                                (df_inv_fresco["Perfil_Pantalla"].str.upper() == perf_orig.upper())
+                            ]
+                            if not m_exacta.empty:
+                                idx_target = m_exacta.index[0]
+                            elif idx in df_inv_fresco.index:
+                                idx_target = idx
+                            else:
+                                idx_target = None
+
+                            if idx_target is not None:
+                                df_inv_fresco.at[idx_target, "Estado"] = "Ocupado"
+                                df_inv_fresco.at[idx_target, "PIN"] = str(i["PIN"]).strip()
+                                df_inv_fresco.at[idx_target, "Perfil_Pantalla"] = perfil_guardar
                             
-                            c_imp = i["Correo_Cliente"] if i["Correo_Cliente"] else i["Correo_Matriz"]
-                            m_uni += r_ven.replace("[plataforma]", i["Plataforma"]).replace("[correo]", c_imp).replace("[clave]", i["Clave_Matriz"]).replace("[perfil]", i["Perfil_Pantalla"]).replace("[pin]", i["PIN"]).replace("[fecha_corte]", "En Pausa" if not act_ya else f_c.strftime('%d/%m/%Y')) + "\n\n"
+                            m_uni += r_ven.replace("[plataforma]", i["Plataforma"]).replace("[correo]", correo_guardar).replace("[clave]", i["Clave_Matriz"]).replace("[perfil]", perfil_guardar).replace("[pin]", str(i["PIN"])).replace("[fecha_corte]", "En Pausa" if not act_ya else f_c.strftime('%d/%m/%Y')) + "\n\n"
                         
-                        agregar_filas("clientes", pd.DataFrame(f_nuevas), COLUMNAS_CLI)
-                        guardar_tabla("inventario", df_inv_actual, COLUMNAS_INV)
-                        registrar_pagos(p_nuevos)
-                        st.session_state.m_exito = "¡Venta Guardada!"
-                        st.session_state.m_copia = m_uni.strip()
-                        st.session_state.carrito = []
-                        st.rerun()
+                        ok_cli = agregar_filas("clientes", pd.DataFrame(f_nuevas), COLUMNAS_CLI)
+                        ok_inv = guardar_tabla("inventario", df_inv_fresco, COLUMNAS_INV)
+                        if ok_cli and ok_inv:
+                            registrar_pagos(p_nuevos)
+                            st.session_state.m_exito = "¡Venta Guardada y Perfil Ocupado!"
+                            st.session_state.m_copia = m_uni.strip()
+                            st.session_state.carrito = []
+                            st.rerun()
 
 # ==============================================================================
 # MÓDULO 3: BASE DE DATOS
@@ -1347,7 +1407,6 @@ elif menu == "🗃️ Base de Datos":
                     filtro_busqueda = filas_cli.apply(lambda r: f"{r['Plataforma']} - {r['Correo']} ({r['Perfil_Pantalla']})", axis=1) == pantalla_a_editar
                     idx_real = filas_cli.index[filtro_busqueda].tolist()[0]
                     datos_fila = df_c.loc[idx_real]
-                    # Llave única por servicio y por sus datos actuales: así el formulario nunca arrastra valores de otro cliente.
                     kf = hashlib.md5(("|".join([str(idx_real)] + [str(v) for v in datos_fila.tolist()])).encode("utf-8")).hexdigest()[:10]
                     
                     df_inv_ed = leer_tabla("inventario", COLUMNAS_INV)
@@ -1407,7 +1466,7 @@ elif menu == "🗃️ Base de Datos":
                                     nombre_final, se_unio = nombre_canonico(df_c.drop(index=filas_ren), nombre_final)
                                     df_c.loc[filas_ren, "Cliente"] = nombre_final
                                     nota_nombre = f" Nombre: «{nombre_actual}» → «{nombre_final}» ({len(filas_ren)} servicio(s))" + (", unido al cliente que ya existía." if se_unio else ".")
-                                df_c.at[idx_real, "Telefono"] = str(n_tel)
+                                df_c.at[idx_real, "Telefono"] = str(n_tel).strip()
                                 df_c.at[idx_real, "Fecha_Corte"] = str(n_f_corte)
                                 df_c.at[idx_real, "Estado_Servicio"] = str(n_est)
                                 if abs(float(n_monto) - monto_original) > 0.001:
@@ -1459,7 +1518,19 @@ elif menu == "🗃️ Base de Datos":
         if not df_i.empty:
             df_c_orf = leer_tabla("clientes", COLUMNAS_CLI)
             df_orf = pantallas_huerfanas(df_i, df_c_orf)
+            df_mal_disp = pantallas_mal_disponibles(df_i, df_c_orf)
             n_rev_i = int((df_i["Estado"] == "🔴 En Revisión").sum())
+            
+            # Detector de pantallas vendidas que quedaron marcadas como Disponibles
+            if not df_mal_disp.empty:
+                st.warning(f"⚠️ Encontré {len(df_mal_disp)} pantalla(s) que ya tiene un cliente activo pero siguen saliendo como 'Disponible':")
+                st.dataframe(df_mal_disp, hide_index=True)
+                if st.button("🔒 Marcar estas pantallas como Ocupado", key="btn_ocupar_sync", type="primary"):
+                    df_i.loc[df_mal_disp.index, "Estado"] = "Ocupado"
+                    guardar_tabla("inventario", df_i, COLUMNAS_INV)
+                    st.session_state.aviso_bd = f"¡Listo! {len(df_mal_disp)} pantalla(s) pasaron a Ocupado."
+                    st.rerun()
+
             if not df_orf.empty:
                 st.warning(f"🔎 Encontré {len(df_orf)} pantalla(s) que no te salen para vender y que ningún cliente tiene:")
                 st.dataframe(df_orf, hide_index=True)
@@ -1468,8 +1539,9 @@ elif menu == "🗃️ Base de Datos":
                     guardar_tabla("inventario", df_i, COLUMNAS_INV)
                     st.session_state.aviso_bd = f"¡Listo! {len(df_orf)} pantalla(s) volvieron a Disponible."
                     st.rerun()
-            else:
-                st.success("✅ Todas las pantallas Ocupadas tienen un cliente asignado.")
+            elif df_mal_disp.empty:
+                st.success("✅ Todas las pantallas Ocupadas y Disponibles están bien sincronizadas con tus clientes.")
+                
             if n_rev_i:
                 st.caption(f"Además hay {n_rev_i} pantalla(s) en 🔴 En Revisión: no salen para vender hasta que las reactives en el Panel Diario.")
             busq_inv = st.text_input("🔍 Buscar (plataforma, correo, perfil, región, estado...)", key="busq_inv", placeholder="Escribe y la lista se filtra")
@@ -1493,7 +1565,9 @@ elif menu == "🗃️ Base de Datos":
                 datos_fila_i = df_i.loc[idx_real_i]
                 
                 with st.form("form_edit_inv"):
-                    ci1, ci2, ci3, ci4 = st.columns(4)
+                    ci0, ci1, ci2, ci3, ci4 = st.columns(5)
+                    
+                    ni_perf = ci0.text_input("Nombre Perfil", value=str(datos_fila_i["Perfil_Pantalla"]))
                     
                     opc_est_inv = ["Disponible", "Ocupado", "🔴 En Revisión"]
                     idx_est_inv = opc_est_inv.index(datos_fila_i["Estado"]) if datos_fila_i["Estado"] in opc_est_inv else 0
@@ -1512,14 +1586,14 @@ elif menu == "🗃️ Base de Datos":
                     
                     col_btn1_i = st.columns(1)[0]
                     if col_btn1_i.form_submit_button("💾 Guardar Cambios", type="primary"):
-                        df_i.at[idx_real_i, "Estado"] = str(ni_est)
-                        df_i.at[idx_real_i, "PIN"] = str(ni_pin)
-                        df_i.at[idx_real_i, "Costo_Matriz"] = str(ni_costo)
+                        df_i.at[idx_real_i, "Perfil_Pantalla"] = str(ni_perf).strip()
+                        df_i.at[idx_real_i, "Estado"] = str(ni_est).strip()
+                        df_i.at[idx_real_i, "PIN"] = str(ni_pin).strip()
+                        df_i.at[idx_real_i, "Costo_Matriz"] = str(ni_costo).strip()
                         df_i.at[idx_real_i, "Fecha_Pago"] = str(ni_f_pago)
                         guardar_tabla("inventario", df_i, COLUMNAS_INV)
                         st.success("¡Inventario actualizado en la nube!")
                         st.rerun()
-                        
 
             st.markdown("---")
             st.subheader("🗑️ Eliminar una cuenta completa")
@@ -1592,8 +1666,6 @@ elif menu == "💰 Finanzas":
     st.markdown("### 📋 Catálogo de Venta al Público")
     df_pre = leer_tabla("precios", COLUMNAS_PRE)
 
-    # No recrear automáticamente productos que el usuario haya eliminado.
-    # Los productos EXTRA faltantes se pueden volver a crear manualmente desde el formulario.
     st.caption("Los productos terminados en EXTRA son precios independientes de venta; no representan cuentas ni plataformas adicionales en el inventario.")
     st.table(df_pre[["Plataforma", "Costo_Matriz", "Precio_Venta_Perfil"]])
 
@@ -1938,7 +2010,8 @@ elif menu == "🛠️ Soportes":
                     tipos_rep = ["--- Seleccione ---", "🔢 El PIN no coincide", "🔑 El correo o la clave no funcionan", "💳 La cuenta sale sin pago / suspendida", "📺 La pantalla falla o no abre", "⏳ Caída / tardé en responder (agregar días)", "📩 Perdió sus datos de acceso (reenviar)"]
                     tipo_rep = st.selectbox("3. ❓ ¿Qué problema tiene?", tipos_rep, key="rep_tipo")
 
-                    m_inv_rep = df_inv_rep[(df_inv_rep["Plataforma"] == d_rep["Plataforma"]) & (df_inv_rep["Correo"] == d_rep["Correo"]) & (df_inv_rep["Perfil_Pantalla"] == d_rep["Perfil_Pantalla"])]
+                    i_inv_found = buscar_fila_inv(df_inv_rep, d_rep)
+                    m_inv_rep = df_inv_rep.loc[[i_inv_found]] if i_inv_found is not None else pd.DataFrame()
                     st.markdown("---")
 
                     if tipo_rep == "⏳ Caída / tardé en responder (agregar días)":
@@ -1985,7 +2058,6 @@ elif menu == "🛠️ Soportes":
                                     f_txt = str(r_dat["Fecha_Corte"])
                                 fechas_dat.append(f_txt)
                                 partes_dat.append(plantilla_dat.replace("[plataforma]", str(acc[0])).replace("[correo]", str(acc[1])).replace("[clave]", str(acc[2])).replace("[perfil]", str(acc[3])).replace("[pin]", str(acc[4])).replace("[fecha_corte]", f_txt).strip())
-                        # Si todos los servicios vencen el mismo día, la fecha se escribe una sola vez al final.
                         if len(partes_dat) > 1 and len(set(fechas_dat)) == 1:
                             f_unica = fechas_dat[0]
                             partes_dat = ["\n".join(ln for ln in p.split("\n") if f_unica not in ln).strip() for p in partes_dat]
@@ -2103,14 +2175,11 @@ elif menu == "🛠️ Soportes":
                             idx_n = disp.index[l_r.index(p_n)]
                             d_n = df_inv.loc[idx_n]
                             
-                            m_v = df_inv[(df_inv["Correo"] == d_viejo["Correo"]) & (df_inv["Perfil_Pantalla"] == d_viejo["Perfil_Pantalla"])]
-                            if not m_v.empty:
-                                df_inv.at[m_v.index[0], "Estado"] = "🔴 En Revisión"
-                            
-                            df_inv.at[idx_n, "Estado"] = "Ocupado"
-                            df_cli.at[idx_cli, "Correo"] = d_n["Correo"]
-                            df_cli.at[idx_cli, "Perfil_Pantalla"] = d_n["Perfil_Pantalla"]
-                            df_cli.at[idx_cli, "Clave_Spotify"] = "" 
+                            df_cli, df_inv = reasignar_servicio(
+                                df_cli, df_inv, idx_cli, idx_n, 
+                                d_viejo["Correo"] if es_spotify_con_correo_cliente(d_viejo) else "", 
+                                ant_revision=True
+                            )
                             
                             guardar_tabla("inventario", df_inv, COLUMNAS_INV)
                             guardar_tabla("clientes", df_cli, COLUMNAS_CLI)
@@ -2120,7 +2189,7 @@ elif menu == "🛠️ Soportes":
                             except:
                                 fc_obj = d_viejo['Fecha_Corte']
                             
-                            st.session_state.m_swap = cargar_plantilla("soporte").replace("[plataforma]", plat_af).replace("[correo]", d_n['Correo']).replace("[clave]", d_n['Clave']).replace("[perfil]", d_n['Perfil_Pantalla']).replace("[pin]", d_n['PIN']).replace("[fecha_corte]", fc_obj)
+                            st.session_state.m_swap = cargar_plantilla("soporte").replace("[plataforma]", plat_af).replace("[correo]", d_n['Correo']).replace("[clave]", d_n['Clave']).replace("[perfil]", df_cli.loc[idx_cli, 'Perfil_Pantalla']).replace("[pin]", d_n['PIN']).replace("[fecha_corte]", fc_obj)
                             st.rerun()
 
     elif opcion_soporte == "🚨 Crisis / Caída Masiva":
@@ -2185,9 +2254,9 @@ elif menu == "🛠️ Soportes":
                         df_cli_mas.at[idx, "Estado_Servicio"] = "Activo"
                         df_cli_mas.at[idx, "Fecha_Congelamiento"] = ""
                         
-                        m_i = df_inv_mas[(df_inv_mas["Plataforma"] == p_lev) & (df_inv_mas["Correo"] == c_lev) & (df_inv_mas["Perfil_Pantalla"] == row["Perfil_Pantalla"])]
-                        if not m_i.empty:
-                            df_inv_mas.at[m_i.index[0], "Estado"] = "Ocupado"
+                        i_inv_m = buscar_fila_inv(df_inv_mas, row)
+                        if i_inv_m is not None:
+                            df_inv_mas.at[i_inv_m, "Estado"] = "Ocupado"
                             
                     guardar_tabla("clientes", df_cli_mas, COLUMNAS_CLI)
                     guardar_tabla("inventario", df_inv_mas, COLUMNAS_INV)
@@ -2223,14 +2292,14 @@ elif menu == "🛠️ Soportes":
                             st.error("⚠️ El correo y la contraseña no pueden estar en blanco.")
                         else:
                             mask_inv = (df_inv_cred["Plataforma"] == plat_sel) & (df_inv_cred["Correo"] == corr_sel)
-                            df_inv_cred.loc[mask_inv, "Correo"] = nuevo_correo
-                            df_inv_cred.loc[mask_inv, "Clave"] = nueva_clave
+                            df_inv_cred.loc[mask_inv, "Correo"] = nuevo_correo.strip()
+                            df_inv_cred.loc[mask_inv, "Clave"] = nueva_clave.strip()
                             df_inv_cred.loc[mask_inv, "Costo_Matriz"] = str(nuevo_costo)
                             mask_ext = (df_inv_cred["Plataforma"] == plat_sel) & (df_inv_cred["IP_Region"] == f"EXTRA de {corr_sel}")
-                            df_inv_cred.loc[mask_ext, "IP_Region"] = f"EXTRA de {nuevo_correo}"
+                            df_inv_cred.loc[mask_ext, "IP_Region"] = f"EXTRA de {nuevo_correo.strip()}"
                             
                             mask_cli = (df_cli_cred["Plataforma"] == plat_sel) & (df_cli_cred["Correo"] == corr_sel)
-                            df_cli_cred.loc[mask_cli, "Correo"] = nuevo_correo
+                            df_cli_cred.loc[mask_cli, "Correo"] = nuevo_correo.strip()
                             
                             guardar_tabla("inventario", df_inv_cred, COLUMNAS_INV)
                             guardar_tabla("clientes", df_cli_cred, COLUMNAS_CLI)
@@ -2268,7 +2337,6 @@ elif menu == "⚙️ Configuración":
     st.subheader("💽 Sistema de Backups (Copia de Seguridad)")
     st.info("Descarga un archivo .zip con todas tus bases de datos descargadas directamente desde la nube de Supabase hasta este preciso momento.")
     
-    # CAMBIO: el ZIP solo se arma cuando presionas el botón
     if st.button("🗂️ Preparar Copia de Seguridad", type="secondary", key="btn_prep_backup"):
         buffer = io.BytesIO()
         with zipfile.ZipFile(buffer, "w") as zip_file:

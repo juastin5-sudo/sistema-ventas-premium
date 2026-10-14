@@ -190,7 +190,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ==============================================================================
-# CONTRASEÑA DE ACCESO (si no hay APP_PASSWORD en los secrets, no pide nada)
+# CONTRASEÑA DE ACCESO
 # ==============================================================================
 def verificar_acceso():
     clave_app = st.secrets.get("APP_PASSWORD", "")
@@ -212,7 +212,7 @@ def verificar_acceso():
 verificar_acceso()
 
 # ==============================================================================
-# 2. SISTEMA DE BASE DE DATOS ULTRA-LIGERO (CORREGIDO Y SINCRONIZADO)
+# 2. SISTEMA DE BASE DE DATOS ULTRA-LIGERO (CON ANTI-DUPLICADOS Y SINCRONIZACIÓN)
 # ==============================================================================
 COLUMNAS_INV = ["Plataforma", "Correo", "Clave", "Perfil_Pantalla", "PIN", "Estado", "Fecha_Pago", "IP_Region", "Costo_Matriz"]
 PLAT_CORREO_CLIENTE = ("SPOTIFY", "CANVA")
@@ -247,7 +247,6 @@ def to_float(val):
     except:
         return 0.0
 
-# Caché reducido a 5 segundos y limpieza de espacios invisibles al leer
 @st.cache_data(ttl=5, show_spinner=False)
 def _leer_tabla_cache(tabla, columnas):
     url = f"{st.secrets['SUPABASE_URL']}/rest/v1/{tabla}?select=*"
@@ -299,6 +298,28 @@ def guardar_tabla(tabla, df, columnas):
         return False
     st.cache_data.clear()
     return True
+
+def actualizar_estado_inv_directo(plataforma, correo, perfil_original, nuevo_estado, nuevo_perfil=None, nuevo_pin=None):
+    """Actualiza directamente la fila en Supabase (PATCH) sin borrar toda la tabla."""
+    st.cache_data.clear()
+    try:
+        url = (
+            f"{st.secrets['SUPABASE_URL']}/rest/v1/inventario"
+            f"?Plataforma=eq.{requests.utils.quote(str(plataforma).strip())}"
+            f"&Correo=eq.{requests.utils.quote(str(correo).strip())}"
+            f"&Perfil_Pantalla=eq.{requests.utils.quote(str(perfil_original).strip())}"
+        )
+        datos = {"Estado": str(nuevo_estado).strip()}
+        if nuevo_perfil is not None:
+            datos["Perfil_Pantalla"] = str(nuevo_perfil).strip()
+        if nuevo_pin is not None:
+            datos["PIN"] = str(nuevo_pin).strip()
+        r = requests.patch(url, headers=get_headers(), json=datos, timeout=15)
+        st.cache_data.clear()
+        return r.status_code < 300
+    except Exception as e:
+        st.error(f"Error actualizando estado en la nube: {e}")
+        return False
 
 def agregar_filas(tabla, df, columnas):
     st.cache_data.clear()
@@ -409,7 +430,7 @@ def etiqueta_cobro(r):
     return f"{ic} {r['cli']} · {r['n']} serv. · ${r['total']:.2f} · {cuando}"
 
 def buscar_fila_inv(df_inv, fila_cli):
-    """Índice de la pantalla del inventario que usa un servicio de cliente (o None), ignorando mayúsculas y espacios."""
+    """Índice de la pantalla del inventario que usa un servicio de cliente (o None). Prioriza las que están Ocupadas si hay duplicadas."""
     if df_inv.empty:
         return None
     plat_c = str(fila_cli["Plataforma"]).strip().upper()
@@ -424,7 +445,10 @@ def buscar_fila_inv(df_inv, fila_cli):
         m = df_inv[m_plat & m_perf]
     else:
         m = df_inv[m_plat & m_corr & m_perf]
-    return m.index[0] if not m.empty else None
+    if m.empty:
+        return None
+    m_ocup = m[m["Estado"] == "Ocupado"]
+    return m_ocup.index[0] if not m_ocup.empty else m.index[0]
 
 def matriz_de_servicio(df_inv, fila_cli):
     """(plataforma, correo de la cuenta que respalda el servicio). En Spotify el cliente usa su propio correo."""
@@ -433,6 +457,35 @@ def matriz_de_servicio(df_inv, fila_cli):
         i = buscar_fila_inv(df_inv, fila_cli)
         return plat, (df_inv.loc[i, "Correo"] if i is not None else None)
     return plat, fila_cli["Correo"]
+
+def detectar_duplicados_inv(df_inv):
+    """Detecta perfiles repetidos (misma Plataforma, Correo y Perfil_Pantalla) y devuelve las copias sobrantes para borrar."""
+    if df_inv.empty:
+        return pd.DataFrame(), []
+    df_tmp = df_inv.copy()
+    # No marcamos como duplicados los "Cupo libre" de Spotify/Canva
+    es_cupo_libre = (
+        df_tmp["Plataforma"].str.upper().isin(PLAT_CORREO_CLIENTE) &
+        df_tmp["Perfil_Pantalla"].str.lower().isin(["cupo libre", ""])
+    )
+    df_chequear = df_tmp[~es_cupo_libre].copy()
+    if df_chequear.empty:
+        return pd.DataFrame(), []
+
+    df_chequear["_k_plat"] = df_chequear["Plataforma"].str.strip().str.upper()
+    df_chequear["_k_corr"] = df_chequear["Correo"].str.strip().str.lower()
+    df_chequear["_k_perf"] = df_chequear["Perfil_Pantalla"].str.strip().str.upper()
+    # Prioridad para conservar: 0 = Ocupado, 1 = En Revisión, 2 = Disponible
+    prioridad = {"Ocupado": 0, "🔴 En Revisión": 1, "Disponible": 2}
+    df_chequear["_prio"] = df_chequear["Estado"].map(lambda x: prioridad.get(x, 3))
+    df_chequear = df_chequear.sort_values("_prio")
+
+    dup_mask = df_chequear.duplicated(subset=["_k_plat", "_k_corr", "_k_perf"], keep="first")
+    idxs_borrar = df_chequear[dup_mask].index.tolist()
+    if not idxs_borrar:
+        return pd.DataFrame(), []
+    df_mostrar = df_inv.loc[idxs_borrar, ["Plataforma", "Correo", "Perfil_Pantalla", "Estado", "PIN"]].copy()
+    return df_mostrar, idxs_borrar
 
 def pantallas_huerfanas(df_inv, df_cli):
     """Pantallas que no salen para vender y que ningún cliente tiene."""
@@ -474,34 +527,28 @@ def pantallas_mal_disponibles(df_inv, df_cli):
 fragmento = st.fragment if hasattr(st, "fragment") else (lambda f: f)
 
 def costo_catalogo(df_pre, producto):
-    """Costo de la cuenta matriz que tienes en Finanzas para un producto (0 si no existe)."""
     if df_pre is None or df_pre.empty:
         return 0.0
     m = df_pre[df_pre["Plataforma"].astype(str).str.upper().str.strip() == str(producto).upper().strip()]
     return to_float(m.iloc[0]["Costo_Matriz"]) if not m.empty else 0.0
 
 def es_paquete(nombre):
-    """True si el producto del catálogo es un paquete de meses, ej. 'AMAZON 3M'."""
     partes = str(nombre).upper().strip().rsplit(" ", 1)
     return len(partes) == 2 and partes[1].endswith("M") and partes[1][:-1].isdigit()
 
 def precio_producto(df_pre, producto):
-    """Precio del catálogo para un producto exacto (o None si no existe)."""
     if df_pre is None or df_pre.empty:
         return None
     m = df_pre[df_pre["Plataforma"].astype(str).str.upper().str.strip() == str(producto).upper().strip()]
     return to_float(m.iloc[0]["Precio_Venta_Perfil"]) if not m.empty else None
 
 def precio_paquete(df_pre, producto, meses):
-    """Precio total de un paquete de N meses (ej. 'AMAZON 3M'), o None si no hay paquete."""
     return precio_producto(df_pre, f"{producto} {int(meses)}M")
 
 def es_spotify_con_correo_cliente(fila_cli):
     return str(fila_cli["Plataforma"]).strip().upper() in PLAT_CORREO_CLIENTE and str(fila_cli["Perfil_Pantalla"]).strip().lower() == str(fila_cli["Correo"]).strip().lower()
 
 def liberar_al_cortar(df_inv, i_inv, fila_cli):
-    """Corta un servicio en el inventario. Devuelve 'revision' (hay que cambiar PIN/clave)
-    o 'libre' (el cliente usaba su propio correo: solo hay que sacarlo del plan)."""
     if es_spotify_con_correo_cliente(fila_cli):
         df_inv.at[i_inv, "Estado"] = "Disponible"
         df_inv.at[i_inv, "Perfil_Pantalla"] = "Cupo libre"
@@ -530,7 +577,6 @@ def reasignar_servicio(df_c, df_inv, idx_c, nuevo_i, correo_cli, ant_revision):
     return df_c, df_inv
 
 def cambiar_correo_spotify(df_c, df_inv, idx_c, nuevo_correo):
-    """Cambia el correo del cliente de Spotify y el nombre de su cupo en el inventario."""
     fila = df_c.loc[idx_c]
     nuevo = str(nuevo_correo).strip()
     if not es_spotify_con_correo_cliente(fila) or not nuevo or nuevo == str(fila["Correo"]).strip():
@@ -543,7 +589,6 @@ def cambiar_correo_spotify(df_c, df_inv, idx_c, nuevo_correo):
     return df_c, df_inv
 
 def actualizar_fecha_pago(plataforma, correo, nueva_fecha):
-    """Mueve la fecha de pago de la matriz y la de sus extras."""
     df = leer_tabla("inventario", COLUMNAS_INV)
     df.loc[(df["Plataforma"] == plataforma) & (df["Correo"] == correo), "Fecha_Pago"] = str(nueva_fecha)
     df.loc[(df["Plataforma"] == plataforma) & (df["IP_Region"] == f"EXTRA de {correo}"), "Fecha_Pago"] = str(nueva_fecha)
@@ -593,7 +638,6 @@ def cargar_plantilla(tipo):
         return ""
 
 def armar_mensaje_datos(plataforma, correo, clave, perfil, pin, fecha_corte):
-    """Mensaje con los datos de acceso, usando tu plantilla de Venta."""
     try:
         fc = pd.to_datetime(fecha_corte).strftime('%d/%m/%Y')
     except:
@@ -602,7 +646,6 @@ def armar_mensaje_datos(plataforma, correo, clave, perfil, pin, fecha_corte):
     return "¡Hola! Aquí tienes tus datos de acceso actualizados:\n\n" + cuerpo
 
 def datos_acceso_servicio(df_inv, fila_cli):
-    """(plataforma, correo, clave, perfil, pin) que usa el cliente en un servicio, o None si no se encuentra."""
     if es_spotify_con_correo_cliente(fila_cli):
         return fila_cli["Plataforma"], fila_cli["Correo"], fila_cli["Clave_Spotify"], fila_cli["Perfil_Pantalla"], "N/A"
     i = buscar_fila_inv(df_inv, fila_cli)
@@ -1084,18 +1127,26 @@ elif menu == "📦 Registrar Cuentas":
         if es_extra and not matriz_padre:
             st.error("⚠️ Elige la cuenta matriz que paga este perfil extra.")
         elif correo and clave:
-            n_perf = []
-            for item in perfiles_a_guardar:
-                n_perf.append({
-                    "Plataforma": plataforma.strip(), "Correo": correo.strip(), "Clave": clave.strip(), 
-                    "Perfil_Pantalla": str(item["nombre"]).strip(), "PIN": str(item["pin"]).strip(), 
-                    "Estado": "Disponible", "Fecha_Pago": str(fecha_pago_cuenta), "IP_Region": ip_region.strip(),
-                    "Costo_Matriz": str(costo_matriz_input)
-                })
-            ok = agregar_filas("inventario", pd.DataFrame(n_perf), COLUMNAS_INV)
-            if ok:
-                st.success("¡Cuenta guardada exitosamente en la Base de Datos de la nube!")
-                st.session_state.pines_azar = [str(random.randint(1000, 9999)) for _ in range(50)]
+            df_inv_chk = leer_tabla("inventario", COLUMNAS_INV)
+            ya_existe = not df_inv_chk[
+                (df_inv_chk["Plataforma"].str.strip().str.upper() == plataforma.strip().upper()) &
+                (df_inv_chk["Correo"].str.strip().str.lower() == correo.strip().lower())
+            ].empty
+            if ya_existe:
+                st.error(f"⚠️ La cuenta '{correo.strip()}' de {plataforma} YA está registrada en tu inventario. No se guardó para evitar perfiles duplicados.")
+            else:
+                n_perf = []
+                for item in perfiles_a_guardar:
+                    n_perf.append({
+                        "Plataforma": plataforma.strip(), "Correo": correo.strip(), "Clave": clave.strip(), 
+                        "Perfil_Pantalla": str(item["nombre"]).strip(), "PIN": str(item["pin"]).strip(), 
+                        "Estado": "Disponible", "Fecha_Pago": str(fecha_pago_cuenta), "IP_Region": ip_region.strip(),
+                        "Costo_Matriz": str(costo_matriz_input)
+                    })
+                ok = agregar_filas("inventario", pd.DataFrame(n_perf), COLUMNAS_INV)
+                if ok:
+                    st.success("¡Cuenta guardada exitosamente en la Base de Datos de la nube!")
+                    st.session_state.pines_azar = [str(random.randint(1000, 9999)) for _ in range(50)]
 
 # ==============================================================================
 # MÓDULO 2: VENTAS 
@@ -1291,7 +1342,6 @@ elif menu == "🛒 Vender Perfiles":
                                 "Metodo_Pago": met, "Meses": str(i["Meses"]), "Tipo": tipo_pago
                             })
                             
-                            # Búsqueda segura de la pantalla en el inventario fresco
                             idx = i["index_original"]
                             perf_orig = i.get("Perfil_Original", perfil_guardar)
                             m_exacta = df_inv_fresco[
@@ -1300,22 +1350,28 @@ elif menu == "🛒 Vender Perfiles":
                                 (df_inv_fresco["Perfil_Pantalla"].str.upper() == perf_orig.upper())
                             ]
                             if not m_exacta.empty:
-                                idx_target = m_exacta.index[0]
+                                df_inv_fresco.loc[m_exacta.index, "Estado"] = "Ocupado"
+                                df_inv_fresco.loc[m_exacta.index, "PIN"] = str(i["PIN"]).strip()
+                                df_inv_fresco.loc[m_exacta.index, "Perfil_Pantalla"] = perfil_guardar
                             elif idx in df_inv_fresco.index:
-                                idx_target = idx
-                            else:
-                                idx_target = None
-
-                            if idx_target is not None:
-                                df_inv_fresco.at[idx_target, "Estado"] = "Ocupado"
-                                df_inv_fresco.at[idx_target, "PIN"] = str(i["PIN"]).strip()
-                                df_inv_fresco.at[idx_target, "Perfil_Pantalla"] = perfil_guardar
+                                df_inv_fresco.at[idx, "Estado"] = "Ocupado"
+                                df_inv_fresco.at[idx, "PIN"] = str(i["PIN"]).strip()
+                                df_inv_fresco.at[idx, "Perfil_Pantalla"] = perfil_guardar
                             
                             m_uni += r_ven.replace("[plataforma]", i["Plataforma"]).replace("[correo]", correo_guardar).replace("[clave]", i["Clave_Matriz"]).replace("[perfil]", perfil_guardar).replace("[pin]", str(i["PIN"])).replace("[fecha_corte]", "En Pausa" if not act_ya else f_c.strftime('%d/%m/%Y')) + "\n\n"
                         
                         ok_cli = agregar_filas("clientes", pd.DataFrame(f_nuevas), COLUMNAS_CLI)
                         ok_inv = guardar_tabla("inventario", df_inv_fresco, COLUMNAS_INV)
-                        if ok_cli and ok_inv:
+                        for i in st.session_state.carrito:
+                            actualizar_estado_inv_directo(
+                                i["Plataforma"],
+                                i["Correo_Matriz"],
+                                i.get("Perfil_Original", i["Perfil_Pantalla"]),
+                                "Ocupado",
+                                nuevo_perfil=i["Perfil_Pantalla"],
+                                nuevo_pin=i["PIN"]
+                            )
+                        if ok_cli:
                             registrar_pagos(p_nuevos)
                             st.session_state.m_exito = "¡Venta Guardada y Perfil Ocupado!"
                             st.session_state.m_copia = m_uni.strip()
@@ -1517,11 +1573,23 @@ elif menu == "🗃️ Base de Datos":
         
         if not df_i.empty:
             df_c_orf = leer_tabla("clientes", COLUMNAS_CLI)
+            
+            # 1. Detector de perfiles duplicados
+            df_dups_inv, idxs_dups_inv = detectar_duplicados_inv(df_i)
+            if not df_dups_inv.empty:
+                st.error(f"🚨 Encontré {len(idxs_dups_inv)} perfil(es) DUPLICADOS en tu inventario (mismo correo y mismo número de perfil). Por eso te salen disponibles o sin cliente:")
+                st.dataframe(df_dups_inv, hide_index=True)
+                if st.button("🧹 Borrar copias repetidas ahora (conserva las ocupadas)", key="btn_limpiar_dups_inv", type="primary"):
+                    df_sin_dups = df_i.drop(index=idxs_dups_inv)
+                    guardar_tabla("inventario", df_sin_dups, COLUMNAS_INV)
+                    st.session_state.aviso_bd = f"¡Listo! Se eliminaron {len(idxs_dups_inv)} copia(s) duplicada(s) del inventario."
+                    st.rerun()
+
             df_orf = pantallas_huerfanas(df_i, df_c_orf)
             df_mal_disp = pantallas_mal_disponibles(df_i, df_c_orf)
             n_rev_i = int((df_i["Estado"] == "🔴 En Revisión").sum())
             
-            # Detector de pantallas vendidas que quedaron marcadas como Disponibles
+            # 2. Detector de pantallas vendidas que quedaron marcadas como Disponibles
             if not df_mal_disp.empty:
                 st.warning(f"⚠️ Encontré {len(df_mal_disp)} pantalla(s) que ya tiene un cliente activo pero siguen saliendo como 'Disponible':")
                 st.dataframe(df_mal_disp, hide_index=True)
@@ -1531,6 +1599,7 @@ elif menu == "🗃️ Base de Datos":
                     st.session_state.aviso_bd = f"¡Listo! {len(df_mal_disp)} pantalla(s) pasaron a Ocupado."
                     st.rerun()
 
+            # 3. Detector de pantallas Ocupadas sin cliente
             if not df_orf.empty:
                 st.warning(f"🔎 Encontré {len(df_orf)} pantalla(s) que no te salen para vender y que ningún cliente tiene:")
                 st.dataframe(df_orf, hide_index=True)
@@ -1539,8 +1608,8 @@ elif menu == "🗃️ Base de Datos":
                     guardar_tabla("inventario", df_i, COLUMNAS_INV)
                     st.session_state.aviso_bd = f"¡Listo! {len(df_orf)} pantalla(s) volvieron a Disponible."
                     st.rerun()
-            elif df_mal_disp.empty:
-                st.success("✅ Todas las pantallas Ocupadas y Disponibles están bien sincronizadas con tus clientes.")
+            elif df_mal_disp.empty and df_dups_inv.empty:
+                st.success("✅ Todas las pantallas Ocupadas y Disponibles están bien sincronizadas y sin duplicados.")
                 
             if n_rev_i:
                 st.caption(f"Además hay {n_rev_i} pantalla(s) en 🔴 En Revisión: no salen para vender hasta que las reactives en el Panel Diario.")
@@ -1556,12 +1625,11 @@ elif menu == "🗃️ Base de Datos":
             st.markdown("---")
             st.subheader("✏️ Editar Inventario")
             
-            opciones_inv = [f"{r['Plataforma']} | {r['Correo']} - Perfil: {r['Perfil_Pantalla']}" for _, r in df_vista_i.iterrows()]
+            opciones_inv = [f"{r['Plataforma']} | {r['Correo']} - Perfil: {r['Perfil_Pantalla']} ({r['Estado']}) [ID:{idx}]" for idx, r in df_vista_i.iterrows()]
             inv_a_editar = st.selectbox("Selecciona la pantalla exacta a modificar:", ["---"] + opciones_inv, index=1 if len(opciones_inv) == 1 else 0, key="edit_inv_sel")
             
             if inv_a_editar != "---":
-                filtro_busqueda_i = df_i.apply(lambda r: f"{r['Plataforma']} | {r['Correo']} - Perfil: {r['Perfil_Pantalla']}", axis=1) == inv_a_editar
-                idx_real_i = df_i.index[filtro_busqueda_i].tolist()[0]
+                idx_real_i = int(inv_a_editar.split("[ID:")[1].replace("]", ""))
                 datos_fila_i = df_i.loc[idx_real_i]
                 
                 with st.form("form_edit_inv"):
@@ -1584,15 +1652,30 @@ elif menu == "🗃️ Base de Datos":
                         
                     ni_f_pago = ci4.date_input("Próximo Pago", value=fecha_pago_act)
                     
-                    col_btn1_i = st.columns(1)[0]
+                    col_btn1_i, col_btn2_i = st.columns(2)
                     if col_btn1_i.form_submit_button("💾 Guardar Cambios", type="primary"):
+                        perf_antiguo = str(datos_fila_i["Perfil_Pantalla"]).strip()
                         df_i.at[idx_real_i, "Perfil_Pantalla"] = str(ni_perf).strip()
                         df_i.at[idx_real_i, "Estado"] = str(ni_est).strip()
                         df_i.at[idx_real_i, "PIN"] = str(ni_pin).strip()
                         df_i.at[idx_real_i, "Costo_Matriz"] = str(ni_costo).strip()
                         df_i.at[idx_real_i, "Fecha_Pago"] = str(ni_f_pago)
                         guardar_tabla("inventario", df_i, COLUMNAS_INV)
+                        actualizar_estado_inv_directo(
+                            datos_fila_i["Plataforma"],
+                            datos_fila_i["Correo"],
+                            perf_antiguo,
+                            ni_est,
+                            nuevo_perfil=ni_perf,
+                            nuevo_pin=ni_pin
+                        )
                         st.success("¡Inventario actualizado en la nube!")
+                        st.rerun()
+
+                    if col_btn2_i.form_submit_button("🗑️ Borrar solo este perfil"):
+                        df_i = df_i.drop(idx_real_i)
+                        guardar_tabla("inventario", df_i, COLUMNAS_INV)
+                        st.session_state.aviso_bd = "¡Perfil eliminado del inventario!"
                         st.rerun()
 
             st.markdown("---")
@@ -1712,7 +1795,6 @@ elif menu == "💰 Finanzas":
     df_cli = leer_tabla("clientes", COLUMNAS_CLI)
     df_pag = leer_tabla("pagos", COLUMNAS_PAG)
 
-    # ---------- CUENTAS: costo, región y ganancia mensual esperada ----------
     st.markdown("### 💼 Tus cuentas: costo, región y ganancia mensual")
     st.info("💡 **Ingreso mensual** = lo que pagan hoy tus clientes activos, llevado a 1 mes (si alguien pagó 3 meses, se divide entre 3). **Costo** = lo que pagas por la cuenta más sus perfiles extra cada 31 días. Edita la **Región** o el **Costo** directamente en la tabla y pulsa Guardar.")
 
@@ -1842,7 +1924,6 @@ elif menu == "💰 Finanzas":
                     else:
                         st.info("No hiciste ningún cambio.")
 
-    # Resumen mensual esperado (por plataforma y global)
     ingreso_rec = float(sum(ing_plat_mes.values()))
     costo_rec = float(sum([to_float(x) for x in df_inv.drop_duplicates(subset=["Plataforma", "Correo"])["Costo_Matriz"]])) if not df_inv.empty else 0.0
     ganancia_rec = ingreso_rec - costo_rec
@@ -1893,7 +1974,6 @@ elif menu == "💰 Finanzas":
             else:
                 st.info("No hay nada nuevo que importar.")
 
-    # Mes a revisar
     df_pag["Fecha_Real"] = pd.to_datetime(df_pag["Fecha"], errors="coerce")
     df_pag["Mes"] = df_pag["Fecha_Real"].dt.strftime("%Y-%m")
     df_pag["Monto_f"] = df_pag["Monto"].apply(to_float).astype(float)

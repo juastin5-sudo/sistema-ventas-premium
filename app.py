@@ -297,6 +297,8 @@ def guardar_tabla(tabla, df, columnas):
     except Exception as e:
         st.error(f"Error de conexión: {e}")
     st.cache_data.clear()
+    if tabla == "clientes":
+        _sync_tras_guardar()
 
 def agregar_filas(tabla, df, columnas):
     try:
@@ -314,6 +316,8 @@ def agregar_filas(tabla, df, columnas):
         st.cache_data.clear()
         return False
     st.cache_data.clear()
+    if tabla == "clientes":
+        _sync_tras_guardar()
     return True
 
 def obtener_tasa_binance():
@@ -614,6 +618,226 @@ def armar_mensaje_datos(plataforma, correo, clave, perfil, pin, fecha_corte):
     cuerpo = cargar_plantilla("venta").replace("[plataforma]", str(plataforma)).replace("[correo]", str(correo)).replace("[clave]", str(clave)).replace("[perfil]", str(perfil)).replace("[pin]", str(pin)).replace("[fecha_corte]", fc)
     return "¡Hola! Aquí tienes tus datos de acceso actualizados:\n\n" + cuerpo
 
+# ==============================================================================
+# CONEXIÓN CON LA PÁGINA DE CÓDIGOS (opcional: solo funciona si pones NEON_URL en los Secrets)
+# ==============================================================================
+try:
+    import psycopg2
+except Exception:
+    psycopg2 = None
+import secrets as _secrets
+
+PLAT_CODIGOS = ("NETFLIX", "DISNEY", "AMAZON", "PRIME")   # plataformas que usan la página de códigos
+
+def _cfg(nombre, defecto=""):
+    try:
+        v = st.secrets[nombre]
+        return str(v).strip() if v is not None else defecto
+    except Exception:
+        return defecto
+
+def codigos_configurado():
+    return psycopg2 is not None and bool(_cfg("NEON_URL"))
+
+def _neon():
+    return psycopg2.connect(_cfg("NEON_URL"), connect_timeout=8)
+
+def slug_usuario(nombre):
+    """Usuario web a partir del nombre: sin tildes, en minúsculas y sin espacios."""
+    base = unicodedata.normalize("NFKD", str(nombre))
+    base = "".join(ch for ch in base if not unicodedata.combining(ch)).lower()
+    base = "".join(ch for ch in base if ch.isalnum())
+    return base or "cliente"
+
+def _usuario_libre(base, usados):
+    if base.lower() not in usados:
+        return base
+    n = 2
+    while f"{base}{n}".lower() in usados:
+        n += 1
+    return f"{base}{n}"
+
+def es_plataforma_codigos(plat):
+    n = _n(plat)
+    return any(k.lower() in n for k in PLAT_CODIGOS)
+
+def calcular_codigos(df_cli):
+    """{ref: {'nombre', 'correos'}} con los clientes ACTIVOS de Netflix, Disney y Amazon y los correos que pueden consultar."""
+    res = {}
+    if df_cli is None or df_cli.empty:
+        return res
+    for _, r in df_cli.iterrows():
+        if r["Estado_Servicio"] != "Activo" or not es_plataforma_codigos(r["Plataforma"]):
+            continue
+        correo = str(r["Correo"]).strip().lower()
+        ref = clave_nombre(r["Cliente"])
+        if "@" not in correo or not ref:
+            continue
+        d = res.setdefault(ref, {"nombre": str(r["Cliente"]).strip(), "correos": []})
+        if correo not in d["correos"]:
+            d["correos"].append(correo)
+    for d in res.values():
+        d["correos"].sort()
+    return res
+
+def _id_vendedor(cur):
+    cur.execute("SELECT id FROM vendedores WHERE usuario=%s", (_cfg("CODIGOS_VENDEDOR", "juastin"),))
+    fila = cur.fetchone()
+    return fila[0] if fila else None
+
+def sincronizar_codigos(df_cli, reiniciar=False):
+    """Deja la página de códigos igual que tus clientes activos de Netflix, Disney y Amazon.
+    Crea a los nuevos, actualiza sus correos y suspende a los que ya no tienen servicio.
+    Con reiniciar=True borra primero a TODOS los clientes de ese vendedor. Devuelve (ok, mensaje, resumen)."""
+    if not codigos_configurado():
+        return False, "La conexión con la página de códigos no está configurada.", {}
+    deseado = calcular_codigos(df_cli)
+    conn = None
+    try:
+        conn = _neon()
+        cur = conn.cursor()
+        cur.execute("ALTER TABLE cuentas ADD COLUMN IF NOT EXISTS cliente_ref TEXT")
+        vid = _id_vendedor(cur)
+        if vid is None:
+            conn.rollback()
+            return False, f"No encontré al vendedor «{_cfg('CODIGOS_VENDEDOR', 'juastin')}» en la página de códigos.", {}
+        borrados = 0
+        if reiniciar:
+            cur.execute("DELETE FROM cuentas WHERE vendedor_id=%s", (vid,))
+            borrados = cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+        cur.execute("SELECT id, usuario_cliente, correos_permitidos, estado_pago, cliente_ref, vendedor_id FROM cuentas")
+        filas = cur.fetchall()
+        usados = {str(f[1]).lower() for f in filas}
+        por_ref = {f[4]: f for f in filas if f[4] and f[5] == vid}
+        creados = actualizados = suspendidos = 0
+        for ref, d in deseado.items():
+            correos_txt = ",".join(d["correos"])
+            f = por_ref.get(ref)
+            if f:
+                if str(f[2] or "") != correos_txt or f[3] != 1:
+                    cur.execute("UPDATE cuentas SET correos_permitidos=%s, estado_pago=1 WHERE id=%s", (correos_txt, f[0]))
+                    actualizados += 1
+            else:
+                usuario = _usuario_libre(slug_usuario(d["nombre"]), usados)
+                usados.add(usuario.lower())
+                clave = "".join(str(_secrets.randbelow(10)) for _ in range(6))
+                cur.execute(
+                    "INSERT INTO cuentas (usuario_cliente, pass_cliente, vendedor_id, estado_pago, correos_permitidos, cliente_ref) VALUES (%s,%s,%s,%s,%s,%s)",
+                    (usuario, clave, vid, 1, correos_txt, ref))
+                creados += 1
+        for ref, f in por_ref.items():
+            if ref not in deseado and (str(f[2] or "").strip() or f[3] != 0):
+                cur.execute("UPDATE cuentas SET correos_permitidos='', estado_pago=0 WHERE id=%s", (f[0],))
+                suspendidos += 1
+        conn.commit()
+        resumen = {"creados": creados, "actualizados": actualizados, "suspendidos": suspendidos, "borrados": borrados}
+        return True, f"Listo: {creados} creado(s), {actualizados} actualizado(s), {suspendidos} suspendido(s)" + (f", {borrados} borrado(s) antes de empezar" if reiniciar else "") + ".", resumen
+    except Exception as e:
+        try:
+            if conn:
+                conn.rollback()
+        except Exception:
+            pass
+        return False, f"No pude conectar con la página de códigos: {e}", {}
+    finally:
+        try:
+            if conn:
+                conn.close()
+        except Exception:
+            pass
+
+def _sync_tras_guardar():
+    """Se llama sola cada vez que cambian tus clientes. Nunca interrumpe la venta: si falla, deja un aviso."""
+    if not codigos_configurado():
+        return
+    try:
+        df = leer_tabla("clientes", COLUMNAS_CLI)
+        firma = json.dumps(calcular_codigos(df), sort_keys=True)
+        if st.session_state.get("codigos_firma") == firma:
+            return
+        ok, msg, _ = sincronizar_codigos(df)
+        if ok:
+            st.session_state["codigos_firma"] = firma
+        else:
+            st.session_state["aviso_codigos"] = "⚠️ Página de códigos: " + msg + " Tu venta o cambio sí se guardó; usa «Sincronizar ahora» en Configuración."
+    except Exception as e:
+        st.session_state["aviso_codigos"] = f"⚠️ Página de códigos: {e}"
+
+def codigos_renombrar(nombre_viejo, nombre_nuevo):
+    """Si cambias el nombre de un cliente, conserva su usuario y clave de la página de códigos."""
+    if not codigos_configurado():
+        return
+    rv, rn = clave_nombre(nombre_viejo), clave_nombre(nombre_nuevo)
+    if rv == rn:
+        return
+    conn = None
+    try:
+        conn = _neon()
+        cur = conn.cursor()
+        vid = _id_vendedor(cur)
+        if vid is None:
+            return
+        cur.execute("SELECT 1 FROM cuentas WHERE vendedor_id=%s AND cliente_ref=%s", (vid, rn))
+        if cur.fetchone():
+            return
+        cur.execute("UPDATE cuentas SET cliente_ref=%s WHERE vendedor_id=%s AND cliente_ref=%s", (rn, vid, rv))
+        conn.commit()
+    except Exception:
+        pass
+    finally:
+        try:
+            if conn:
+                conn.close()
+        except Exception:
+            pass
+
+def listar_codigos():
+    """Filas (cliente_ref, usuario, clave, correos, estado_pago) de la página de códigos, o None si no hay conexión."""
+    if not codigos_configurado():
+        return None
+    conn = None
+    try:
+        conn = _neon()
+        cur = conn.cursor()
+        vid = _id_vendedor(cur)
+        if vid is None:
+            return None
+        cur.execute("SELECT cliente_ref, usuario_cliente, pass_cliente, correos_permitidos, estado_pago FROM cuentas WHERE vendedor_id=%s AND cliente_ref IS NOT NULL ORDER BY usuario_cliente", (vid,))
+        return cur.fetchall()
+    except Exception:
+        return None
+    finally:
+        try:
+            if conn:
+                conn.close()
+        except Exception:
+            pass
+
+def credenciales_codigos(nombre_cliente):
+    """(usuario, clave) del cliente en la página de códigos, o None."""
+    filas = listar_codigos()
+    if not filas:
+        return None
+    ref = clave_nombre(nombre_cliente)
+    for f in filas:
+        if f[0] == ref:
+            return f[1], f[2]
+    return None
+
+def mensaje_acceso_codigos(nombre_cliente, df_cli=None):
+    """Texto para enviar con el usuario y la clave de la página de códigos (vacío si el cliente no usa Netflix, Disney ni Amazon)."""
+    if not codigos_configurado():
+        return ""
+    if df_cli is None:
+        df_cli = leer_tabla("clientes", COLUMNAS_CLI)
+    if clave_nombre(nombre_cliente) not in calcular_codigos(df_cli):
+        return ""
+    cred = credenciales_codigos(nombre_cliente)
+    if not cred:
+        return ""
+    url = _cfg("CODIGOS_URL")
+    return "🔑 *Códigos de acceso (Netflix / Disney / Amazon)*\n" + (f"Página: {url}\n" if url else "") + f"Usuario: {cred[0]}\nClave: {cred[1]}"
+
 def datos_acceso_servicio(df_inv, fila_cli):
     """(plataforma, correo, clave, perfil, pin) que usa el cliente en un servicio, o None si no se encuentra."""
     if es_spotify_con_correo_cliente(fila_cli):
@@ -663,6 +887,9 @@ if "error_pagos" in st.session_state:
 # ==============================================================================
 # MÓDULO 0: PANEL DIARIO 
 # ==============================================================================
+if "aviso_codigos" in st.session_state:
+    st.warning(st.session_state.pop("aviso_codigos"))
+
 if menu == "📌 Panel Diario":
     st.header("Lo que tienes que hacer hoy 📝")
     hoy_pd = pd.to_datetime("today").normalize()
@@ -1325,6 +1552,9 @@ elif menu == "🛒 Vender Perfiles":
                         agregar_filas("clientes", pd.DataFrame(f_nuevas), COLUMNAS_CLI)
                         guardar_tabla("inventario", df_inv_actual, COLUMNAS_INV)
                         registrar_pagos(p_nuevos)
+                        bloque_cod = mensaje_acceso_codigos(cli)
+                        if bloque_cod:
+                            m_uni += bloque_cod + "\n\n"
                         st.session_state.m_exito = "¡Venta Guardada!"
                         st.session_state.m_copia = m_uni.strip()
                         st.session_state.carrito = []
@@ -1474,6 +1704,8 @@ elif menu == "🗃️ Base de Datos":
                                     filas_ren = df_c.index[df_c["Cliente"] == nombre_actual].tolist() if n_todos else [idx_real]
                                     nombre_final, se_unio = nombre_canonico(df_c.drop(index=filas_ren), nombre_final)
                                     df_c.loc[filas_ren, "Cliente"] = nombre_final
+                                    if n_todos:
+                                        codigos_renombrar(nombre_actual, nombre_final)
                                     nota_nombre = f" Nombre: «{nombre_actual}» → «{nombre_final}» ({len(filas_ren)} servicio(s))" + (", unido al cliente que ya existía." if se_unio else ".")
                                 df_c.at[idx_real, "Telefono"] = str(n_tel)
                                 df_c.at[idx_real, "Fecha_Corte"] = str(n_f_corte)
@@ -2073,6 +2305,9 @@ elif menu == "🛠️ Soportes":
                             st.warning("No encontré en el inventario: " + ", ".join(faltan_dat) + ". Revísalo en Base de Datos > Inventario.")
                         if partes_dat:
                             st.markdown("**Mensaje listo para copiar y enviar:**")
+                            bloque_cod_d = mensaje_acceso_codigos(cli_rep, df_cli_rep)
+                            if bloque_cod_d:
+                                partes_dat.append(bloque_cod_d)
                             st.code("¡Hola! Aquí tienes tus datos de acceso 🙌\n\n" + "\n\n".join(partes_dat), language="markdown")
 
                     elif tipo_rep == "📺 La pantalla falla o no abre":
@@ -2378,3 +2613,47 @@ elif menu == "⚙️ Configuración":
             type="primary",
             key="btn_backup"
         )
+
+    st.markdown("---")
+    st.subheader("🔗 Página de códigos (Netflix, Disney y Amazon)")
+    if not codigos_configurado():
+        st.info("Todavía no está conectada. Para conectarla: 1) agrega la línea `psycopg2-binary` en tu archivo requirements.txt, 2) en los Secrets de Streamlit agrega `NEON_URL = \"...\"` (la dirección de la base de datos de tu página de códigos), `CODIGOS_VENDEDOR = \"juastin\"` y, si quieres que salga en los mensajes, `CODIGOS_URL = \"https://...\"`.")
+    else:
+        df_cli_cfg = leer_tabla("clientes", COLUMNAS_CLI)
+        deseado_cfg = calcular_codigos(df_cli_cfg)
+        st.success(f"Conectada. Hay {len(deseado_cfg)} cliente(s) con Netflix, Disney o Amazon activos. Cada vez que vendes, editas, cortas o cambias a un cliente, la página de códigos se actualiza sola.")
+        if st.button("🔄 Sincronizar ahora", key="btn_sync_cod"):
+            ok_s, msg_s, _ = sincronizar_codigos(df_cli_cfg)
+            if ok_s:
+                st.session_state["codigos_firma"] = json.dumps(deseado_cfg, sort_keys=True)
+                st.success(msg_s)
+            else:
+                st.error(msg_s)
+        with st.expander("🧨 Borrar a todos los clientes de la página de códigos y crearlos de nuevo"):
+            st.warning("Esto borra TODOS los clientes que hay hoy en la página de códigos (también los que creaste a mano allá) y crea de nuevo a tus clientes activos de Netflix, Disney y Amazon con usuario y clave nuevos. Después tendrás que enviarles sus accesos nuevos.")
+            conf_reset = st.checkbox("Entiendo que los accesos actuales dejarán de funcionar", key="chk_reset_cod")
+            if st.button("🧨 Borrar y crear de nuevo", disabled=not conf_reset, key="btn_reset_cod"):
+                ok_r, msg_r, _ = sincronizar_codigos(df_cli_cfg, reiniciar=True)
+                if ok_r:
+                    st.session_state["codigos_firma"] = json.dumps(deseado_cfg, sort_keys=True)
+                    st.success(msg_r)
+                else:
+                    st.error(msg_r)
+        filas_cod = listar_codigos()
+        if filas_cod:
+            nombres_ref = {k: v["nombre"] for k, v in deseado_cfg.items()}
+            for _, rr in df_cli_cfg.iterrows():
+                nombres_ref.setdefault(clave_nombre(rr["Cliente"]), str(rr["Cliente"]))
+            tabla_cod = pd.DataFrame([{
+                "Cliente": nombres_ref.get(f[0], f[0]), "Usuario": f[1], "Clave": f[2],
+                "Correos permitidos": f[3] or "", "Estado": "🟢 Activo" if f[4] == 1 else "🔴 Suspendido"} for f in filas_cod])
+            st.dataframe(tabla_cod, hide_index=True)
+            cli_msg = st.selectbox("Mensaje de acceso para:", ["--- Seleccione ---"] + sorted(tabla_cod["Cliente"].tolist()), key="cfg_cod_cli")
+            if cli_msg != "--- Seleccione ---":
+                msg_acc = mensaje_acceso_codigos(cli_msg, df_cli_cfg)
+                if msg_acc:
+                    st.code(msg_acc, language="markdown")
+                else:
+                    st.info("Este cliente no tiene Netflix, Disney ni Amazon activos.")
+        elif filas_cod is not None:
+            st.info("Aún no hay clientes en la página de códigos. Pulsa «Sincronizar ahora» para crearlos.")

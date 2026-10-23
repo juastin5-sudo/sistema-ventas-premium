@@ -412,6 +412,18 @@ def telefono_de(df_cli_actual):
             return t
     return tels[0] if tels else ""
 
+def enlace_whatsapp(telefono, mensaje):
+    """Link wa.me que abre el chat con el mensaje ya escrito. Devuelve '' si el teléfono no sirve."""
+    d = "".join(ch for ch in str(telefono) if ch.isdigit())
+    if d.startswith("00"):
+        d = d[2:]
+    elif d.startswith("0") and len(d) == 11:  # 0412xxxxxxx (Venezuela, formato local)
+        d = "58" + d[1:]
+    if len(d) < 8:
+        return ""
+    from urllib.parse import quote
+    return f"https://wa.me/{d}?text={quote(mensaje)}"
+
 def tarjeta():
     """Recuadro con borde (si la versión de Streamlit lo permite)."""
     try:
@@ -1134,8 +1146,14 @@ if menu == "📌 Panel Diario":
                                     t_bs = total_usd_combo * st.session_state.tasa_cambio
                                     st.markdown(f"**Total: ${total_usd_combo:.2f} USD | {t_bs:,.2f} Bs**")
 
+                                    msg_cobro = cargar_plantilla("cobro").replace("[cliente]", cli).replace("[servicios]", txt_serv.strip()).replace("[monto_usd]", f"{total_usd_combo:.2f}").replace("[monto_bs]", f"{t_bs:,.2f}").strip()
+                                    url_wa = enlace_whatsapp(telefono_cli, msg_cobro)
+                                    if url_wa:
+                                        st.link_button("💬 Cobrar por WhatsApp", url_wa, use_container_width=True)
+                                    else:
+                                        st.caption("⚠️ Este cliente no tiene un teléfono válido para abrir WhatsApp (edítalo en Editar Cliente).")
                                     with st.expander("📋 Ver mensaje"):
-                                        st.code(cargar_plantilla("cobro").replace("[cliente]", cli).replace("[servicios]", txt_serv.strip()).replace("[monto_usd]", f"{total_usd_combo:.2f}").replace("[monto_bs]", f"{t_bs:,.2f}").strip(), language="markdown")
+                                        st.code(msg_cobro, language="markdown")
 
                                     c_r1, c_r2, c_r3 = st.columns([1, 2, 2])
                                     meses_ren = c_r1.number_input("Meses", min_value=1, max_value=12, value=1, key=f"mren_{cli}")

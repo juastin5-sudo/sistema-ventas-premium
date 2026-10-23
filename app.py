@@ -83,7 +83,7 @@ st.markdown("""
         }
 
         div[data-testid="stMetricLabel"] > div {
-            color: #9aa0a6 !important;
+            color: #cfd3da !important;
             font-size: 0.78rem !important;
             text-transform: none !important;
             font-weight: 600 !important;
@@ -186,6 +186,22 @@ st.markdown("""
         [data-testid="stTable"] tr:hover td { background: rgba(139, 92, 246, 0.06) !important; }
 
         hr { border-color: rgba(255, 255, 255, 0.05) !important; margin: 1.1rem 0 !important; }
+    
+        /* Contraste: texto claro y legible en celular y tablet (también con tema claro del equipo) */
+        html { color-scheme: dark; }
+        [data-testid="stCaptionContainer"], [data-testid="stCaptionContainer"] *, .stCaption, small {
+            color: #d3d6de !important; opacity: 1 !important;
+        }
+        [data-testid="stWidgetLabel"] p, [data-testid="stWidgetLabel"] label, label, [data-testid="stMetricLabel"], [data-testid="stMetricLabel"] * {
+            color: #e4e6ee !important; opacity: 1 !important;
+        }
+        [data-testid="stMarkdownContainer"] p, [data-testid="stMarkdownContainer"] li, [data-testid="stText"] {
+            color: #f1f1f4;
+        }
+        [data-testid="stExpander"] summary, [data-testid="stExpander"] summary * { color: #f1f1f4 !important; }
+        button[role="tab"], button[role="tab"] * { color: #d3d6de !important; }
+        button[role="tab"][aria-selected="true"], button[role="tab"][aria-selected="true"] * { color: #ffffff !important; }
+        [data-testid="stSidebar"] * { color: #e4e6ee; }
     </style>
 """, unsafe_allow_html=True)
 

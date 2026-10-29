@@ -252,7 +252,7 @@ PLANTILLAS_DEFECTO = {
     "cobro": "¡Hola [cliente]! 👋 Paso por acá para recordarte que tus servicios están próximos a vencer:\n\n[servicios]\n*Total a transferir:* $[monto_usd] USD o su equivalente **[monto_bs] Bs**.\n\nMe avisas al realizar el pago para mantener tus pantallas activas sin interrupciones. ¡Muchas gracias! ✨",
     "cotizacion": "¡Hola! Aquí tienes el desglose y la cuenta de tus servicios:\n\n[servicios]\n💰 *Total:* $[monto_usd] USD / *[monto_bs] Bs*\n\n👇 *Puedes realizar tu pago móvil a cualquiera de estas cuentas:* \n\n*Monto a transferir = [monto_bs] bs*",
     "venta": "Plataforma: [plataforma]\n*Correo*: [correo]\n*Clave*: [clave]\n*Perfil*: [perfil] PIN: [pin]\n\n*Vence el*: [fecha_corte]",
-    "codigos": "🔑 *Códigos de acceso (Netflix / Disney / Amazon)*\nPágina: [pagina]\nUsuario: [usuario]\nClave: [clave]",
+    "codigos": "🔑 *Códigos de acceso de [plataformas]*\nPágina: [pagina]\nUsuario: [usuario]\nClave: [clave]",
     "soporte": "¡Hola! Para solucionar tu inconveniente rápidamente y que sigas disfrutando sin pausas, te he migrado a una pantalla nueva limpia. Aquí tienes los datos actualizados:\n\nPlataforma: [plataforma]\n*Correo*: [correo]\n*Clave*: [clave]\n*Perfil*: [perfil] PIN: [pin]\n\n*Nota: Tu fecha de corte mensual se mantiene igual ([fecha_corte]).*"
 }
 
@@ -861,6 +861,22 @@ def credenciales_codigos(nombre_cliente):
             return f[1], f[2]
     return None
 
+def nombres_plataformas_codigos(nombre_cliente, df_cli):
+    """Servicios activos del cliente que usan la página de códigos, escritos para el mensaje: 'Netflix', 'Netflix y Disney', 'Netflix, Disney y Amazon'."""
+    ref = clave_nombre(nombre_cliente)
+    orden, vistos = [], set()
+    for _, r in df_cli.iterrows():
+        if clave_nombre(r["Cliente"]) != ref or r["Estado_Servicio"] != "Activo" or not es_plataforma_codigos(r["Plataforma"]):
+            continue
+        p = str(r["Plataforma"]).upper()
+        n = "Netflix" if "NETFLIX" in p else ("Disney" if "DISNEY" in p else "Amazon Prime")
+        if n not in vistos:
+            vistos.add(n)
+            orden.append(n)
+    if len(orden) <= 1:
+        return "".join(orden)
+    return ", ".join(orden[:-1]) + " y " + orden[-1]
+
 def mensaje_acceso_codigos(nombre_cliente, df_cli=None):
     """Texto para enviar con el usuario y la clave de la página de códigos (vacío si el cliente no usa Netflix, Disney ni Amazon)."""
     if not codigos_configurado():
@@ -873,7 +889,7 @@ def mensaje_acceso_codigos(nombre_cliente, df_cli=None):
     if not cred:
         return ""
     url = _cfg("CODIGOS_URL")
-    return cargar_plantilla("codigos").replace("[pagina]", url or "").replace("[usuario]", str(cred[0])).replace("[clave]", str(cred[1])).strip()
+    return cargar_plantilla("codigos").replace("[plataformas]", nombres_plataformas_codigos(nombre_cliente, df_cli)).replace("[pagina]", url or "").replace("[usuario]", str(cred[0])).replace("[clave]", str(cred[1])).strip()
 
 def datos_acceso_servicio(df_inv, fila_cli):
     """(plataforma, correo, clave, perfil, pin) que usa el cliente en un servicio, o None si no se encuentra."""
@@ -2600,7 +2616,7 @@ elif menu == "🛠️ Soportes":
 # ==============================================================================
 elif menu == "⚙️ Configuración":
     st.header("⚙️ Editor Maestro de Mensajes")
-    st.info("💡 **Etiquetas:** `[cliente]`, `[servicios]`, `[monto_usd]`, `[monto_bs]`, `[plataforma]`, `[correo]`, `[clave]`, `[perfil]`, `[pin]`, `[fecha_corte]`. Para el mensaje 5: `[pagina]`, `[usuario]`, `[clave]`.")
+    st.info("💡 **Etiquetas:** `[cliente]`, `[servicios]`, `[monto_usd]`, `[monto_bs]`, `[plataforma]`, `[correo]`, `[clave]`, `[perfil]`, `[pin]`, `[fecha_corte]`. Para el mensaje 5: `[plataformas]` (pone solo los servicios que tiene el cliente, por ejemplo «Netflix y Disney»), `[pagina]`, `[usuario]`, `[clave]`.")
     
     plantillas = cargar_plantillas_todas()
     st.caption("Tus mensajes se guardan en la nube (Supabase), así que no se pierden cuando la página se reinicia. Si al guardar sale un error de tabla, crea la tabla `plantillas` con el SQL que te di.")
@@ -2611,7 +2627,7 @@ elif menu == "⚙️ Configuración":
         t_ven = st.text_area("🛒 3. Venta Exitosa", value=plantillas.get("venta", ""), height=120, key="cfg_ven")
         t_sop = st.text_area("🛠️ 4. Soporte Técnico (Swap)", value=plantillas.get("soporte", ""), height=150, key="cfg_sop")
         t_cod = st.text_area("🔑 5. Acceso a la página de códigos (link, usuario y clave)", value=plantillas.get("codigos", ""), height=120, key="cfg_cod",
-                             help="Etiquetas: [pagina] = el link de la página de códigos, [usuario] y [clave] = los del cliente.")
+                             help="Etiquetas: [plataformas] = los servicios que tiene ese cliente (ej. Disney, o Netflix y Disney), [pagina] = el link de la página de códigos, [usuario] y [clave] = los del cliente.")
         
         if st.form_submit_button("💾 Guardar Plantillas", type="primary"):
             df_pl_nuevo = pd.DataFrame([

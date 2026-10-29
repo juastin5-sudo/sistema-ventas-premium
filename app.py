@@ -10,6 +10,14 @@ import io
 import hashlib
 import unicodedata
 from datetime import date, datetime, timedelta
+from datetime import timezone as _tz
+
+# Hora de Venezuela (UTC-4, sin horario de verano). El servidor de Streamlit está en hora UTC, por eso se fija aquí.
+ZONA_VE = _tz(timedelta(hours=-4))
+def ahora_ve():
+    return datetime.now(ZONA_VE).replace(tzinfo=None)
+def hoy_ve():
+    return ahora_ve().date()
 
 # ==============================================================================
 # 1. CONFIGURACIÓN Y DISEÑO UI/UX
@@ -244,6 +252,7 @@ PLANTILLAS_DEFECTO = {
     "cobro": "¡Hola [cliente]! 👋 Paso por acá para recordarte que tus servicios están próximos a vencer:\n\n[servicios]\n*Total a transferir:* $[monto_usd] USD o su equivalente **[monto_bs] Bs**.\n\nMe avisas al realizar el pago para mantener tus pantallas activas sin interrupciones. ¡Muchas gracias! ✨",
     "cotizacion": "¡Hola! Aquí tienes el desglose y la cuenta de tus servicios:\n\n[servicios]\n💰 *Total:* $[monto_usd] USD / *[monto_bs] Bs*\n\n👇 *Puedes realizar tu pago móvil a cualquiera de estas cuentas:* \n\n*Monto a transferir = [monto_bs] bs*",
     "venta": "Plataforma: [plataforma]\n*Correo*: [correo]\n*Clave*: [clave]\n*Perfil*: [perfil] PIN: [pin]\n\n*Vence el*: [fecha_corte]",
+    "codigos": "🔑 *Códigos de acceso (Netflix / Disney / Amazon)*\nPágina: [pagina]\nUsuario: [usuario]\nClave: [clave]",
     "soporte": "¡Hola! Para solucionar tu inconveniente rápidamente y que sigas disfrutando sin pausas, te he migrado a una pantalla nueva limpia. Aquí tienes los datos actualizados:\n\nPlataforma: [plataforma]\n*Correo*: [correo]\n*Clave*: [clave]\n*Perfil*: [perfil] PIN: [pin]\n\n*Nota: Tu fecha de corte mensual se mantiene igual ([fecha_corte]).*"
 }
 
@@ -600,7 +609,7 @@ if 'carrito' not in st.session_state: st.session_state.carrito = []
 if 'ultima_actualizacion' not in st.session_state: st.session_state.ultima_actualizacion = datetime.min
 if 'tasa_cambio' not in st.session_state: st.session_state.tasa_cambio = 40.00
 
-ahora = datetime.now()
+ahora = ahora_ve()
 if (ahora - st.session_state.ultima_actualizacion) > timedelta(minutes=30):
     st.session_state.ultima_actualizacion = ahora
     try:
@@ -864,7 +873,7 @@ def mensaje_acceso_codigos(nombre_cliente, df_cli=None):
     if not cred:
         return ""
     url = _cfg("CODIGOS_URL")
-    return "🔑 *Códigos de acceso (Netflix / Disney / Amazon)*\n" + (f"Página: {url}\n" if url else "") + f"Usuario: {cred[0]}\nClave: {cred[1]}"
+    return cargar_plantilla("codigos").replace("[pagina]", url or "").replace("[usuario]", str(cred[0])).replace("[clave]", str(cred[1])).strip()
 
 def datos_acceso_servicio(df_inv, fila_cli):
     """(plataforma, correo, clave, perfil, pin) que usa el cliente en un servicio, o None si no se encuentra."""
@@ -908,7 +917,7 @@ if st.secrets.get("APP_PASSWORD", ""):
         st.rerun()
 
 st.title("Panel Central de Cuentas")
-st.caption(f"Hoy es {date.today().strftime('%d/%m/%Y')}")
+st.caption(f"Hoy es {hoy_ve().strftime('%d/%m/%Y')} · {ahora_ve().strftime('%I:%M %p')} (hora de Venezuela)")
 if "error_pagos" in st.session_state:
     st.error(st.session_state.pop("error_pagos"))
 
@@ -920,7 +929,7 @@ if "aviso_codigos" in st.session_state:
 
 if menu == "📌 Panel Diario":
     st.header("Lo que tienes que hacer hoy 📝")
-    hoy_pd = pd.to_datetime("today").normalize()
+    hoy_pd = pd.Timestamp(hoy_ve())
     
     df_clientes_raw = leer_tabla("clientes", COLUMNAS_CLI)
 
@@ -1016,8 +1025,8 @@ if menu == "📌 Panel Diario":
                     cp2.code(row['Clave_Spotify'], language="markdown")
                 if cp3.button("✅ Activar", key=f"activar_{str(idx)}", type="primary", use_container_width=True):
                     meses = int(to_float(row.get('Meses_Contratados', 1)))
-                    df_clientes_raw.at[idx, "Fecha_Inicio"] = str(date.today())
-                    df_clientes_raw.at[idx, "Fecha_Corte"] = str(sumar_meses(date.today(), meses if meses > 0 else 1))
+                    df_clientes_raw.at[idx, "Fecha_Inicio"] = str(hoy_ve())
+                    df_clientes_raw.at[idx, "Fecha_Corte"] = str(sumar_meses(hoy_ve(), meses if meses > 0 else 1))
                     df_clientes_raw.at[idx, "Estado_Servicio"] = "Activo"
                     guardar_tabla("clientes", df_clientes_raw, COLUMNAS_CLI)
                     st.rerun()
@@ -1199,7 +1208,7 @@ if menu == "📌 Panel Diario":
                                                     df_full_cli.at[idx_row, "Fecha_Corte"] = str(sumar_meses(f_vieja, meses_ren))
                                                     df_full_cli.at[idx_row, "Monto"] = str(round(monto_ren, 2))
                                                     pagos_ren.append({
-                                                        "Fecha": str(date.today()), "Cliente": df_full_cli.loc[idx_row, "Cliente"],
+                                                        "Fecha": str(hoy_ve()), "Cliente": df_full_cli.loc[idx_row, "Cliente"],
                                                         "Plataforma": df_full_cli.loc[idx_row, "Plataforma"], "Correo": df_full_cli.loc[idx_row, "Correo"],
                                                         "Perfil_Pantalla": df_full_cli.loc[idx_row, "Perfil_Pantalla"], "Monto": str(round(monto_ren, 2)),
                                                         "Metodo_Pago": df_full_cli.loc[idx_row, "Metodo_Pago"], "Meses": str(meses_ren), "Tipo": "Renovación"
@@ -1254,7 +1263,7 @@ if menu == "📌 Panel Diario":
                             reg_m = regs_cta[0] if regs_cta else ""
                             st.markdown(f"**{row['Plataforma']}** · " + (f"🌎 **{reg_m}**" if reg_m else "🌎 _sin región (anótala en Finanzas)_") + f" · {est}")
                             st.caption(f"{row['Correo']}  \n💸 ${c_mat:.2f}{txt_extra} · {c_mat * st.session_state.tasa_cambio:,.2f} Bs")
-                            base_pago = max(row["Fecha_Real"].date(), date.today())
+                            base_pago = max(row["Fecha_Real"].date(), hoy_ve())
                             nueva_31 = base_pago + timedelta(days=DIAS_CICLO_MATRIZ)
                             if st.button(f"✅ Ya pagué → próximo pago {nueva_31.strftime('%d/%m/%Y')}", key=f"bp31_{str(idx)}", type="primary", use_container_width=True):
                                 actualizar_fecha_pago(row["Plataforma"], row["Correo"], nueva_31)
@@ -1283,7 +1292,7 @@ elif menu == "📦 Registrar Cuentas":
         
     col1, col2 = st.columns(2)
     matriz_padre = None
-    fecha_padre = date.today()
+    fecha_padre = hoy_ve()
     with col1:
         plataforma = st.selectbox("Plataforma (Se añaden desde Finanzas)", lista_plataformas, key="reg_plat")
         
@@ -1298,7 +1307,7 @@ elif menu == "📦 Registrar Cuentas":
                 try:
                     fecha_padre = pd.to_datetime(mats_reg[mats_reg["Correo"] == matriz_padre].iloc[0]["Fecha_Pago"]).date()
                 except:
-                    fecha_padre = date.today()
+                    fecha_padre = hoy_ve()
             else:
                 st.warning(f"Primero registra la cuenta matriz de {plataforma}.")
         
@@ -1325,7 +1334,7 @@ elif menu == "📦 Registrar Cuentas":
                 cantidad_perfiles = st.number_input("Cupos del equipo (invitaciones)", min_value=1, max_value=100, value=10, key="reg_cant_canva")
             else:
                 cantidad_perfiles = st.number_input("Perfiles a vender", min_value=1, max_value=15, value=5, key="reg_cant")
-            fecha_pago_cuenta = st.date_input("Día de próximo pago al proveedor (por defecto, 31 días)", value=date.today() + timedelta(days=DIAS_CICLO_MATRIZ), key="reg_fecha")
+            fecha_pago_cuenta = st.date_input("Día de próximo pago al proveedor (por defecto, 31 días)", value=hoy_ve() + timedelta(days=DIAS_CICLO_MATRIZ), key="reg_fecha")
             ip_region = st.text_input("IP / Región (Ej: USA, Autopagable)", key="reg_ip")
         
     st.markdown("---")
@@ -1525,7 +1534,7 @@ elif menu == "🛒 Vender Perfiles":
                 act_ya = st.checkbox("✅ ¿Servicio activado y entregado al instante?", value=True, key=f"frm_act_{cart_len}")
                 
                 usar_fecha_manual = st.checkbox("📅 Cliente que ya tenía el servicio: poner la fecha de corte a mano", value=False, key=f"frm_usar_fecha_{cart_len}")
-                fecha_corte_manual = st.date_input("Fecha de corte (solo se usa si marcaste la casilla de arriba)", value=date.today(), key=f"frm_fecha_corte_{cart_len}")
+                fecha_corte_manual = st.date_input("Fecha de corte (solo se usa si marcaste la casilla de arriba)", value=hoy_ve(), key=f"frm_fecha_corte_{cart_len}")
                 st.caption("Si marcas la casilla, la fecha de inicio se calcula hacia atrás según los meses contratados, y el pago queda anotado en esa fecha (no en el mes de hoy).")
                 
                 cb1, cb2 = st.columns(2)
@@ -1549,7 +1558,7 @@ elif menu == "🛒 Vender Perfiles":
                         p_nuevos = []
                         e_ini = "Activo" if act_ya else "Pendiente"
                         r_ven = cargar_plantilla("venta")
-                        f_base = date.today()
+                        f_base = hoy_ve()
                         
                         for i in st.session_state.carrito:
                             if usar_fecha_manual and act_ya:
@@ -1693,7 +1702,7 @@ elif menu == "🗃️ Base de Datos":
                         try:
                             fecha_actual = pd.to_datetime(datos_fila["Fecha_Corte"]).date()
                         except:
-                            fecha_actual = date.today()
+                            fecha_actual = hoy_ve()
                             
                         n_f_corte = c2.date_input("Fecha de Corte", value=fecha_actual, key=f"ec_fc_{kf}")
                         
@@ -1851,7 +1860,7 @@ elif menu == "🗃️ Base de Datos":
                     try:
                         fecha_pago_act = pd.to_datetime(datos_fila_i["Fecha_Pago"]).date()
                     except:
-                        fecha_pago_act = date.today()
+                        fecha_pago_act = hoy_ve()
                         
                     ni_f_pago = ci4.date_input("Próximo Pago", value=fecha_pago_act)
                     
@@ -1922,7 +1931,7 @@ elif menu == "💰 Finanzas":
         t_man = st.number_input("Tasa Activa (Bs / USD)", min_value=0.01, value=to_float(st.session_state.tasa_cambio), step=0.01, key="fin_tasa")
         if t_man != st.session_state.tasa_cambio:
              st.session_state.tasa_cambio = t_man
-             st.session_state.ultima_actualizacion = datetime.now()
+             st.session_state.ultima_actualizacion = ahora_ve()
     with c_tasa2:
         st.write(" ")
         st.write(" ")
@@ -1930,7 +1939,7 @@ elif menu == "💰 Finanzas":
             t_n = obtener_tasa_binance()
             if t_n:
                 st.session_state.tasa_cambio = t_n
-                st.session_state.ultima_actualizacion = datetime.now()
+                st.session_state.ultima_actualizacion = ahora_ve()
                 st.success(f"¡Conectado! Tasa: **{t_n} Bs**")
                 st.rerun()
 
@@ -2019,7 +2028,7 @@ elif menu == "💰 Finanzas":
                 f_pago_m, txt_vence = pd.NaT, "Sin fecha"
             else:
                 f_pago_m = _fp.normalize()
-                d_pago = (f_pago_m.date() - date.today()).days
+                d_pago = (f_pago_m.date() - hoy_ve()).days
                 txt_vence = f"Vencida hace {abs(d_pago)} d" if d_pago < 0 else ("Hoy" if d_pago == 0 else f"En {d_pago} d")
             filas_cta.append({
                 "Plataforma": plat_m, "Correo": corr_m, "Región": r_m["IP_Region"], "Fecha de pago": f_pago_m, "Vence": txt_vence,
@@ -2171,7 +2180,7 @@ elif menu == "💰 Finanzas":
     df_pag["Mes"] = df_pag["Fecha_Real"].dt.strftime("%Y-%m")
     df_pag["Monto_f"] = df_pag["Monto"].apply(to_float).astype(float)
     meses_disp = sorted([m for m in df_pag["Mes"].dropna().unique().tolist()], reverse=True)
-    mes_actual = date.today().strftime("%Y-%m")
+    mes_actual = hoy_ve().strftime("%Y-%m")
     if mes_actual not in meses_disp:
         meses_disp.insert(0, mes_actual)
     mes_sel = st.selectbox("📅 Mes a revisar", meses_disp, key="fin_mes")
@@ -2402,10 +2411,10 @@ elif menu == "🛠️ Soportes":
                             st.markdown(f"**Cuenta que lo paga:** {plat_pago} | `{corr_pago}`")
                             st.markdown(f"**Próximo pago registrado:** {fila_mat['Fecha_Pago']} | **A pagar:** ${tot_pago:.2f} | **Clientes en esa cuenta:** {n_cli_pago}")
                             fp_pago = pd.to_datetime(fila_mat["Fecha_Pago"], errors="coerce")
-                            if pd.isna(fp_pago) or fp_pago.date() > date.today():
+                            if pd.isna(fp_pago) or fp_pago.date() > hoy_ve():
                                 st.warning("En tu sistema esta cuenta todavía no vence. Si en la plataforma sale sin pago, márcala como **por pagar hoy** para que aparezca en el aviso del Panel Diario.")
                                 if st.button("🚨 Marcar como POR PAGAR HOY", type="primary", key=f"btn_rep_pago_{idx_rep}"):
-                                    actualizar_fecha_pago(plat_pago, corr_pago, date.today())
+                                    actualizar_fecha_pago(plat_pago, corr_pago, hoy_ve())
                                     st.session_state.m_reporte = "¡Hola! Ya estamos reactivando tu cuenta, te aviso apenas quede lista 🙏"
                                     st.session_state.m_reporte_titulo = "Cuenta marcada como por pagar. Mensaje para el cliente:"
                                     st.rerun()
@@ -2487,7 +2496,7 @@ elif menu == "🛠️ Soportes":
                 
                 if mat_cai and mat_cai != "--- Seleccione ---" and st.button("💥 Declarar Caída", type="primary", key="btn_caida"):
                     p_cai, c_cai = mat_cai.split(" | ")
-                    hoy_str = str(date.today())
+                    hoy_str = str(hoy_ve())
                     
                     m_cli = (df_cli_mas["Plataforma"] == p_cai) & (df_cli_mas["Correo"] == c_cai)
                     df_cli_mas.loc[m_cli, "Estado_Servicio"] = "Congelado"
@@ -2513,7 +2522,7 @@ elif menu == "🛠️ Soportes":
                 
                 if mat_lev and mat_lev != "--- Seleccione ---" and st.button("▶️ Levantar Servicio", key="btn_lev"):
                     p_lev, c_lev = mat_lev.split(" | ")
-                    hoy_d = date.today()
+                    hoy_d = hoy_ve()
                     afect = cong[(cong["Plataforma"] == p_lev) & (cong["Correo"] == c_lev)]
                     
                     for idx, row in afect.iterrows():
@@ -2591,7 +2600,7 @@ elif menu == "🛠️ Soportes":
 # ==============================================================================
 elif menu == "⚙️ Configuración":
     st.header("⚙️ Editor Maestro de Mensajes")
-    st.info("💡 **Etiquetas:** `[cliente]`, `[servicios]`, `[monto_usd]`, `[monto_bs]`, `[plataforma]`, `[correo]`, `[clave]`, `[perfil]`, `[pin]`, `[fecha_corte]`.")
+    st.info("💡 **Etiquetas:** `[cliente]`, `[servicios]`, `[monto_usd]`, `[monto_bs]`, `[plataforma]`, `[correo]`, `[clave]`, `[perfil]`, `[pin]`, `[fecha_corte]`. Para el mensaje 5: `[pagina]`, `[usuario]`, `[clave]`.")
     
     plantillas = cargar_plantillas_todas()
     st.caption("Tus mensajes se guardan en la nube (Supabase), así que no se pierden cuando la página se reinicia. Si al guardar sale un error de tabla, crea la tabla `plantillas` con el SQL que te di.")
@@ -2601,11 +2610,14 @@ elif menu == "⚙️ Configuración":
         t_cot = st.text_area("📋 2. Cotización (Pago Móvil)", value=plantillas.get("cotizacion", ""), height=250, key="cfg_cot")
         t_ven = st.text_area("🛒 3. Venta Exitosa", value=plantillas.get("venta", ""), height=120, key="cfg_ven")
         t_sop = st.text_area("🛠️ 4. Soporte Técnico (Swap)", value=plantillas.get("soporte", ""), height=150, key="cfg_sop")
+        t_cod = st.text_area("🔑 5. Acceso a la página de códigos (link, usuario y clave)", value=plantillas.get("codigos", ""), height=120, key="cfg_cod",
+                             help="Etiquetas: [pagina] = el link de la página de códigos, [usuario] y [clave] = los del cliente.")
         
         if st.form_submit_button("💾 Guardar Plantillas", type="primary"):
             df_pl_nuevo = pd.DataFrame([
                 {"Clave": "cobro", "Texto": t_cobro}, {"Clave": "cotizacion", "Texto": t_cot},
                 {"Clave": "venta", "Texto": t_ven}, {"Clave": "soporte", "Texto": t_sop},
+                {"Clave": "codigos", "Texto": t_cod},
             ])
             guardar_tabla("plantillas", df_pl_nuevo, COLUMNAS_PLA)
             if leer_tabla("plantillas", COLUMNAS_PLA).empty:
@@ -2642,7 +2654,7 @@ elif menu == "⚙️ Configuración":
         st.download_button(
             label="📦 Descargar Copia de Seguridad ahora",
             data=st.session_state.backup_zip,
-            file_name=f"Backup_Streaming_Nube_{date.today()}.zip",
+            file_name=f"Backup_Streaming_Nube_{hoy_ve()}.zip",
             mime="application/zip",
             type="primary",
             key="btn_backup"

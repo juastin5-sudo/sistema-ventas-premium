@@ -1036,6 +1036,7 @@ if menu == "📌 Panel Diario":
 
     col_cobros, col_pagos = st.columns([3, 2])
 
+    # ---------------------------------------------------------------- COBROS (un cliente a la vez)
     with col_cobros:
         @fragmento
         def _bloque_cobros():
@@ -1392,6 +1393,7 @@ elif menu == "📦 Registrar Cuentas":
                     for fila_np in n_perf:
                         if _n(fila_np["Perfil_Pantalla"]) in ya_estan:
                             continue
+                        # el perfil nuevo hereda los datos de la cuenta que ya existía
                         fila_np.update({"Clave": base_cta["Clave"], "Fecha_Pago": base_cta["Fecha_Pago"], "IP_Region": base_cta["IP_Region"], "Costo_Matriz": base_cta["Costo_Matriz"]})
                         nuevos_ok.append(fila_np)
                     nota_dup = f" Esa cuenta ya existía: no dupliqué {len(n_perf) - len(nuevos_ok)} perfil(es) que ya estaban."
@@ -1424,6 +1426,7 @@ elif menu == "🛒 Vender Perfiles":
     df_pre = leer_tabla("precios", COLUMNAS_PRE)
     
     st.markdown("#### 📊 Pantallas Disponibles en Stock")
+    # Las filas "PLATAFORMA EXTRA" son precios de catálogo, no plataformas físicas del inventario.
     lp = df_inv_actual["Plataforma"].dropna().astype(str).unique().tolist()
     
     df_disp_tot = df_inv_actual[df_inv_actual["Estado"] == "Disponible"]
@@ -1983,7 +1986,8 @@ elif menu == "🗃️ Base de Datos":
                         
                     ni_f_pago = ci4.date_input("Próximo Pago", value=fecha_pago_act)
                     
-                    col_btn1_i = st.columns(1)[0]
+                    col_btn1_i, col_btn2_i = st.columns(2)
+                    
                     if col_btn1_i.form_submit_button("💾 Guardar Cambios", type="primary"):
                         df_i.at[idx_real_i, "Estado"] = str(ni_est)
                         df_i.at[idx_real_i, "PIN"] = str(ni_pin)
@@ -1991,6 +1995,12 @@ elif menu == "🗃️ Base de Datos":
                         df_i.at[idx_real_i, "Fecha_Pago"] = str(ni_f_pago)
                         guardar_tabla("inventario", df_i, COLUMNAS_INV)
                         st.success("¡Inventario actualizado en la nube!")
+                        st.rerun()
+                        
+                    if col_btn2_i.form_submit_button("🗑️ Eliminar esta pantalla"):
+                        df_i = df_i.drop(idx_real_i)
+                        guardar_tabla("inventario", df_i, COLUMNAS_INV)
+                        st.warning("¡Pantalla individual eliminada para siempre!")
                         st.rerun()
                         
 
@@ -2065,6 +2075,8 @@ elif menu == "💰 Finanzas":
     st.markdown("### 📋 Catálogo de Venta al Público")
     df_pre = leer_tabla("precios", COLUMNAS_PRE)
 
+    # No recrear automáticamente productos que el usuario haya eliminado.
+    # Los productos EXTRA faltantes se pueden volver a crear manualmente desde el formulario.
     st.caption("Los productos terminados en EXTRA son precios independientes de venta; no representan cuentas ni plataformas adicionales en el inventario.")
     st.table(df_pre[["Plataforma", "Costo_Matriz", "Precio_Venta_Perfil"]])
 
@@ -2778,6 +2790,7 @@ elif menu == "⚙️ Configuración":
     st.subheader("💽 Sistema de Backups (Copia de Seguridad)")
     st.info("Descarga un archivo .zip con todas tus bases de datos descargadas directamente desde la nube de Supabase hasta este preciso momento.")
     
+    # CAMBIO: el ZIP solo se arma cuando presionas el botón
     if st.button("🗂️ Preparar Copia de Seguridad", type="secondary", key="btn_prep_backup"):
         buffer = io.BytesIO()
         with zipfile.ZipFile(buffer, "w") as zip_file:

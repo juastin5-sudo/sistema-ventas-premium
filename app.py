@@ -1,37 +1,3 @@
-¡Perfecto! Entiendo exactamente lo que pasó. Como el chat anterior se estaba quedando sin espacio, comprimió el código demasiado.
-
-Ahora sí, he tomado el **código completo y original** que me acabas de pasar y le he inyectado todas las funciones nuevas **respetando los espacios, los saltos de línea y la estructura limpia** para que puedas leerlo y editarlo cómodamente.
-
-### 📝 Resumen de lo que incluye esta super-versión:
-
-1. **🛡️ Historial Inteligente de Spotify (Regla de los 12 meses):** Cada vez que cortas un Spotify, el sistema recuerda en qué familia estaba. Si vas a Vender Perfiles e intentas meter ese mismo correo en una familia distinta, te lanza una alerta roja para evitar que te lo bloqueen.
-2. **🚨 Alerta de Stock Crítico:** Si te quedas sin pantallas disponibles de Netflix, Magis, etc., el Panel Diario te pone un cartel rojo gigante arriba avisándote para que compres más.
-3. **⚡ Modo Excel (Editor Rápido por Matriz):** En *Base de Datos*, la nueva pestaña "Editor Rápido" te deja seleccionar una cuenta matriz y te abre los 5 o 6 perfiles tipo Excel. Haces doble clic, cambias la clave, le das a guardar y listo. Rapidísimo.
-4. **🚑 Crisis y Mudanzas Masivas:** En *Soportes*, ahora tienes dos opciones para caídas:
-* **Caída Temporal:** Congelas a todos y te da los links de WhatsApp para avisarles. Al reactivar, te deja sumarles días de compensación y avisarles.
-* **Baneo Definitivo:** Eliges la cuenta baneada y eliges una cuenta nueva. El sistema pasa a todos los clientes a la cuenta nueva de un solo golpe y te deja todo listo.
-
-
-
-### 🛠️ Paso 1: Crea la nueva tabla en Supabase
-
-Para que el historial de Spotify funcione, ve a Supabase > SQL Editor y corre este pequeño comando para crear la tabla de la memoria:
-
-```sql
-CREATE TABLE historial_spotify (
-    id SERIAL PRIMARY KEY,
-    "Correo_Cliente" TEXT,
-    "Cuenta_Matriz" TEXT,
-    "Fecha" TEXT
-);
-
-```
-
-### 💻 Paso 2: Código Completo
-
-Copia y pega todo esto en tu archivo `app.py`. Tiene su formato original, limpio y sin comprimir:
-
-```python
 import streamlit as st
 import pandas as pd
 import os
